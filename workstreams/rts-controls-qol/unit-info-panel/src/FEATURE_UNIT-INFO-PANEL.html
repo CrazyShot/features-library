@@ -1,0 +1,103 @@
+<!-- ===== FEATURE: UNIT-INFO-PANEL START (id: UNIT-INFO-PANEL-1.1.0) =====
+ Shows real combat information for the selected friendly unit (full stats + its own HP bar) and, for several selected units, a group summary with NO combined/averaged HP.
+ Same for a clicked enemy / several enemies.
+ Enemies are INSPECT-ONLY: they live in this feature's own list (INS) and never enter SU, so every host command (move/attack/stop) and the whole
+ combat/AI code are untouched. Left-click a visible enemy to inspect it; right-click with units selected still attacks it (host behaviour).
+ Data   : only fields/constants that exist: hp/mh, e.dmg, DW.{dmg,cd,reach,spd}, RANGE, REACH, SPD, ESPD, u.mv/u.fight/u.ord, e.tg, e.wl.
+          Three values are literals inside the host AI and are mirrored in the STATS table below (ranger dmg 9 / cd 1.0, enemy cd 1.05) - if the AI
+          changes them, edit STATS. There is NO armor/defense stat in the game, so none is shown.
+ Touches: no existing function is edited. Wraps clickSel (enemy inspect) and uiUpdate (renders into a new #uip block inside #pn) and drawWorld (ring).
+ API    : window.FEATURE_UNIT_INFO { inspect(), setInspect(list), clearInspect(), stats(entity), cfg }
+-->
+<style id="feature-unitinfo-css">
+#pn{box-sizing:border-box}   /* so the runtime max-width below includes the panel's padding/border */
+#uip{margin-top:6px;width:100%;font-size:12px;line-height:1.4}
+#uip .r{display:flex;justify-content:space-between;gap:10px}#uip .r span{opacity:.72;white-space:nowrap}#uip .r b{font-weight:600;text-align:right;flex:1;min-width:0}
+#uip .hb{display:block;height:6px;margin:2px 0 3px;background:#1a1210;border:1px solid rgba(0,0,0,.5);border-radius:3px;overflow:hidden}
+#uip .hb u{display:block;height:100%;text-decoration:none;background:#6fd35a}
+#uip.en .hb u{background:#d6483a}#uip .sub{opacity:.7;font-size:11px;margin-bottom:2px}#uip .sep{height:1px;background:rgba(255,255,255,.12);margin:4px 0}
+</style>
+<script id="feature-unitinfo">
+(()=>{
+'use strict';
+const ID='UNIT-INFO-PANEL-1.1.0';
+const CFG={enemyName:'Vampire',ring:true,ringColor:'255,70,60'};
+const HOST={SU:typeof SU,SB:typeof SB,U:typeof U,E:typeof E,G:typeof G,cam:typeof cam,X:typeof X,Y:typeof Y,W:typeof W,H:typeof H,clickSel:typeof clickSel,uiUpdate:typeof uiUpdate,pickEnemy:typeof pickEnemy,fogVis:typeof fogVis,BT:typeof BT,drawWorld:typeof drawWorld,g:typeof g,dpr:typeof dpr,DW:typeof DW,RANGE:typeof RANGE,REACH:typeof REACH,SPD:typeof SPD,ESPD:typeof ESPD};
+const missing=Object.keys(HOST).filter(k=>HOST[k]==='undefined');
+if(missing.length||!document.getElementById('pn')){console.warn('['+ID+'] disabled: host globals missing: '+missing.join(', '));return}
+const pn=document.getElementById('pn'),$=id=>document.getElementById(id);
+const uip=document.createElement('div');uip.id='uip';uip.style.display='none';pn.insertBefore(uip,$('tr'));
+/* keep #pn to the left of the build bar: measured at runtime (the bar is centred, so its left edge depends on the viewport) */
+const barEl=document.getElementById('bar');
+function fit(){if(!barEl)return;const r=barEl.getBoundingClientRect();if(r.width>0)pn.style.maxWidth=Math.max(200,Math.floor(r.left-12-10))+'px'}
+addEventListener('resize',fit);fit();
+/* ---------- real stats ---------- */
+const STATS={
+ dwarf:()=>({name:'Dwarf Warrior',cat:'Melee infantry',dmg:DW.dmg,cd:DW.cd,range:DW.reach,ranged:false,spd:DW.spd}),
+ ranger:()=>({name:'Ranger',cat:'Ranged infantry (arrows)',dmg:9,cd:1,range:RANGE,ranged:true,spd:SPD}),     /* dmg 9 / cd 1 are literals in the host ranger step */
+ enemy:e=>({name:CFG.enemyName,cat:(e.wl?'Wilderness':'Wave attacker')+' · melee',dmg:e.dmg,cd:1.05,range:REACH,ranged:false,spd:ESPD})   /* cd 1.05 is a literal in the host enemy step */
+};
+const kindOf=u=>u.en?'enemy':(u.kind||(u.mel?'dwarf':'ranger'));
+function stats(u){const k=kindOf(u),s=STATS[k]?STATS[k](u):{name:k,cat:'Unit',dmg:u.dmg,cd:1,range:1,ranged:false,spd:SPD};s.kind=k;s.effSpd=s.spd*(u.sm||1);return s}
+const f1=v=>(Math.round(v*10)/10).toString(),f2=v=>(Math.round(v*100)/100).toString();
+const row=(l,v)=>'<div class="r"><span>'+l+'</span><b>'+v+'</b></div>';
+const targetName=t=>t?(t.type?BT[t.type].n:t.en?CFG.enemyName:t.kind==='ranger'?'Ranger':'Dwarf Warrior'):'';
+function status(u){
+ if(u.en){if(u.tg&&!u.tg.dead)return(G.T-u.atk<1.2?'Attacking ':'Advancing on ')+targetName(u.tg);return u.mv?'Moving':'Idle'}
+ if(u.ord&&u.ord.t&&!u.ord.t.dead)return'Attacking (ordered)';if(u.fight)return'Fighting';if(u.mv)return'Moving';return'Idle'}
+/* ---------- inspect state (enemies only) ---------- */
+let INS=[];
+const visible=e=>!e.dead&&E.includes(e)&&fogVis(e.x,e.y);
+const setInspect=l=>{INS=l.filter(visible);if(INS.length){SU=[];SB=null}};
+const clearInspect=()=>{INS=[]};
+const _click=window.clickSel,_ui=window.uiUpdate,_dw=window.drawWorld;
+window.clickSel=function(sx,sy,add){
+ _click(sx,sy,add);
+ if(SU.length||SB){INS=[];return}                       /* something friendly was hit */
+ const e=pickEnemy(sx,sy);                              /* host hit-test (fog aware) */
+ if(!e){if(!add)INS=[];return}
+ INS=add&&INS.length?(INS.includes(e)?INS.filter(x=>x!==e):[...INS,e]):[e]};
+/* ---------- rendering ---------- */
+let last='';
+const span=(l,fn)=>{let lo=1e9,hi=-1e9;for(const u of l){const v=fn(u);if(v<lo)lo=v;if(v>hi)hi=v}return lo===hi?f1(lo):f1(lo)+'–'+f1(hi)};
+function block(list,enemy){
+ /* ONE unit: full individual stats incl. its own HP bar.  SEVERAL units: a group summary only - NO HP is summed or averaged
+    (a combined HP number/bar would hide who is wounded); attack/range/speed are per-unit values and are labelled "each". */
+ const by=new Map();for(const u of list){const k=kindOf(u);if(!by.has(k))by.set(k,[]);by.get(k).push(u)}
+ let h='';
+ if(list.length===1){const u=list[0],s=stats(u),w=u.wl;
+  if(enemy)h+='<div class="sub">'+(w?'Wilderness group of '+(w.m?w.m.length:'?'):(G.wave>0?'Wave '+G.wave+' attacker':'Attacker'))+'</div>';
+  h+=row('Type',s.cat)+row('HP',Math.ceil(Math.max(0,u.hp))+' / '+Math.ceil(u.mh))+'<i class="hb"><u style="width:'+Math.max(0,Math.min(100,u.hp/u.mh*100))+'%"></u></i>';
+  h+=row('Attack',f1(s.dmg)+' damage · every '+f2(s.cd)+' s (≈'+f1(s.dmg/s.cd)+' dps)')+row('Range',(s.ranged?'Ranged · ':'Melee · ')+f2(s.range)+' tiles')+row('Move speed',f1(s.effSpd)+' tiles/s'+((u.sm||1)!==1?' (modified)':''))+row('Status',status(u));
+  return h}
+ h+='<div class="sub">'+list.length+' selected · select a single unit to see its HP</div>';
+ for(const[k,l]of by){const s=stats(l[0]),dmg=span(l,u=>u.en?u.dmg:stats(u).dmg),spd=span(l,u=>stats(u).effSpd);
+  const cat=enemy?(l.every(u=>u.wl)?'Wilderness · melee':l.some(u=>u.wl)?'Wave + wilderness · melee':'Wave attackers · melee'):s.cat;
+  h+='<div class="sep"></div>'+row(l.length+'× '+s.name,cat)+row('Attack (each)',dmg+' damage · every '+f2(s.cd)+' s')+row('Range (each)',(s.ranged?'Ranged · ':'Melee · ')+f2(s.range)+' tiles')+row('Speed (each)',spd+' tiles/s')}
+ return h}
+function render(){
+ fit();
+ const su=SU.filter(u=>!u.dead);INS=INS.filter(visible);if(su.length||SB)INS=[];
+ let mode=su.length?'units':INS.length?'enemy':'';
+ if(!mode){if(last!==''){uip.innerHTML='';uip.style.display='none';last=''}return}
+ pn.style.display='block';uip.style.display='block';
+ let title,sub='';
+ if(mode==='units'){
+  const nd=su.filter(u=>kindOf(u)==='dwarf').length,nr=su.length-nd;
+  title=SB?'Mixed selection: '+su.length+(su.length>1?' units':' unit')+' + building':nd&&nr?su.length+' units selected ('+nd+' Dwarf, '+nr+' Ranger)':nd?nd+(nd>1?' Dwarf Warriors selected':' Dwarf Warrior selected'):nr+(nr>1?' Rangers selected':' Ranger selected');
+  if(SB){$('am').style.display=$('sx').style.display='inline-block'}}
+ else{const n=INS.length;title=n>1?n+' '+CFG.enemyName+'s selected':CFG.enemyName;sub='Enemy — inspect only (right-click with units selected to attack)';
+  $('tr').style.display=$('am').style.display=$('sx').style.display='none'}
+ $('pt').textContent=title;
+ if(mode==='enemy')$('pi').textContent=sub;
+ const html=block(mode==='units'?su:INS,mode==='enemy');
+ const key=mode+'|'+html;if(key!==last){last=key;uip.className=mode==='enemy'?'en':'';uip.innerHTML=html}}
+window.uiUpdate=function(){_ui();render()};
+/* ring under inspected enemies */
+window.drawWorld=function(T,z,ox,oy){_dw(T,z,ox,oy);if(!CFG.ring||!INS.length)return;
+ g.save();g.setTransform(dpr*z,0,0,dpr*z,dpr*ox,dpr*oy);g.lineWidth=2/ z*1.4;g.strokeStyle='rgba('+CFG.ringColor+',.95)';g.fillStyle='rgba('+CFG.ringColor+',.12)';
+ for(const e of INS){const sx=X(e.x,e.y),sy=Y(e.x,e.y,1);g.beginPath();g.ellipse(sx,sy+1,15,7.5,0,0,6.283);g.fill();g.stroke()}g.restore()};
+window.FEATURE_UNIT_INFO={id:ID,cfg:CFG,inspect:()=>INS.slice(),setInspect,clearInspect,stats};
+})();
+</script>
+<!-- ===== FEATURE: UNIT-INFO-PANEL END (id: UNIT-INFO-PANEL-1.1.0) ===== -->

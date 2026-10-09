@@ -1,0 +1,14 @@
+name: Integration problem
+description: Something went wrong while integrating a feature into the main game
+labels: ["integration-problem"]
+body:
+  - type: input
+    attributes: {label: Feature ID}
+    validations: {required: true}
+  - type: input
+    attributes: {label: Main-game revision tested}
+  - type: textarea
+    attributes: {label: What happened, description: "Moved anchors, console errors, failing tests (paste real output)"}
+    validations: {required: true}
+  - type: textarea
+    attributes: {label: Needed from the feature owner}

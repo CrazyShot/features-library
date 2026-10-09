@@ -1,0 +1,10 @@
+index.html
+!**/templates/**/index.html
+*backup*
+*.bak
+*.zip
+.env
+*.pem
+*.key
+__pycache__/
+*.png.tmp

@@ -1,0 +1,52 @@
+<!-- ===== FEATURE: CONTROL GROUPS START (id: CTRLGROUPS-1.0.0) =====
+ Self-contained. Reads/writes only: SU, SB (selection), cam, X(), Y(), toast(). Touches no existing function.
+ Keys:  Ctrl/Cmd+1-9 assign current selection (empty selection clears the group)
+        4-9 or Alt+1-9 select group (plain 1-3 stay game-speed hotkeys)  ·  press same key twice quickly = also centre camera
+ UI:    left-edge chip column (click = select, double-click = select + centre).  API: window.FEATURE_CTRLGROUPS
+-->
+<style id="feature-ctrlgroups-css">
+#cg-bar{position:absolute;left:12px;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;gap:4px;z-index:5;pointer-events:auto;user-select:none;-webkit-user-select:none}
+#cg-bar .cg-hint{font:10.5px Georgia,serif;color:var(--ink);opacity:.5;max-width:92px;line-height:1.3;pointer-events:none}
+#cg-bar button{all:unset;box-sizing:border-box;cursor:pointer;display:flex;align-items:center;gap:7px;min-width:62px;padding:4px 9px;font:12px Georgia,serif;color:var(--ink);background:var(--panel);border:1px solid var(--edge);border-radius:6px;backdrop-filter:blur(3px)}
+#cg-bar button b{color:#ffcf7a;letter-spacing:.05em;font-size:13px}
+#cg-bar button span{font-variant-numeric:lining-nums tabular-nums}
+#cg-bar button:hover{background:rgba(80,54,28,.85)}
+#cg-bar button.on{border-color:#ffcf7a;background:rgba(110,70,30,.9);box-shadow:0 0 10px rgba(255,170,70,.4)}
+</style>
+<script id="feature-ctrlgroups">
+(()=>{
+const ID='CTRLGROUPS-1.0.0';
+const CFG={plainDigits:[4,5,6,7,8,9],altRecall:true,dblMs:350,centerOnDouble:true};   /* plainDigits: add 1,2,3 only if the speed hotkeys are moved */
+try{if(typeof SU==='undefined'||typeof cam==='undefined'||typeof X!=='function'||typeof Y!=='function'||typeof toast!=='function')throw new Error('host globals missing (SU/cam/X/Y/toast)')}
+catch(err){console.warn('['+ID+'] disabled: '+err.message);return}
+const groups=Array.from({length:10},()=>[]);let last={n:0,t:0};
+const live=n=>groups[n]=groups[n].filter(u=>!u.dead);
+const say=m=>{try{toast(m)}catch(e){}};
+function assign(n){const m=SU.filter(u=>!u.dead);groups[n]=m.slice();say(m.length?'Group '+n+' set · '+m.length+(m.length>1?' units':' unit'):'Group '+n+' cleared');draw(true)}
+function recall(n,centre){const m=live(n);if(!m.length){say('Group '+n+' is empty — Ctrl+'+n+' to assign');return false}
+ SU=m.slice();SB=null;
+ if(centre){let cx=0,cy=0;for(const u of m){cx+=u.x;cy+=u.y}cx/=m.length;cy/=m.length;cam.tx=X(cx,cy);cam.ty=Y(cx,cy,1)-10}   /* game loop clamps cam.tx/ty and eases */
+ draw(true);return true}
+addEventListener('keydown',e=>{
+ if(e.repeat||/INPUT|TEXTAREA|SELECT/.test((e.target&&e.target.tagName)||''))return;
+ const m=/^Digit([1-9])$/.exec(e.code);if(!m)return;const n=+m[1];
+ if(e.ctrlKey||e.metaKey){e.preventDefault();assign(n);return}
+ if(e.shiftKey)return;                                    /* Shift+digit = build hotkeys (host) */
+ const plain=!e.altKey&&CFG.plainDigits.includes(n),alt=e.altKey&&CFG.altRecall;
+ if(!plain&&!alt)return;e.preventDefault();
+ const now=performance.now(),dbl=last.n===n&&now-last.t<CFG.dblMs;last={n,t:now};
+ recall(n,CFG.centerOnDouble&&dbl)},true);
+const bar=document.createElement('div');bar.id='cg-bar';document.body.appendChild(bar);
+let sig='';
+function draw(force){const parts=[];let any=false;
+ for(let n=1;n<=9;n++){const g=live(n);if(!g.length)continue;any=true;const on=g.length===SU.length&&g.every(u=>SU.includes(u));parts.push(n+':'+g.length+(on?'*':''))}
+ const s=parts.join('|');if(!force&&s===sig)return;sig=s;bar.textContent='';
+ if(!any){const h=document.createElement('div');h.className='cg-hint';h.textContent='Ctrl+1–9 sets a control group';bar.appendChild(h);return}
+ for(let n=1;n<=9;n++){const g=live(n);if(!g.length)continue;const on=g.length===SU.length&&g.every(u=>SU.includes(u));
+  const b=document.createElement('button');b.className=on?'on':'';b.title='Group '+n+' — click: select · double-click: select + centre · Ctrl+'+n+': reassign';
+  b.innerHTML='<b>'+n+'</b><span>'+g.length+'×</span>';b.onclick=()=>recall(n,false);b.ondblclick=()=>recall(n,true);bar.appendChild(b)}}
+setInterval(()=>draw(false),200);draw(true);
+window.FEATURE_CTRLGROUPS={id:ID,cfg:CFG,assign,recall,get:n=>live(n).slice(),clear:n=>{groups[n]=[];draw(true)}};
+})();
+</script>
+<!-- ===== FEATURE: CONTROL GROUPS END (id: CTRLGROUPS-1.0.0) ===== -->
