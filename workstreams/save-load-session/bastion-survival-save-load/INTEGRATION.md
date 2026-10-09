@@ -20,18 +20,53 @@ No other feature-library module is required. This block is tightly coupled to th
 
 ## Integration steps
 
-1. Add or retain the manual buttons in `#rs`: `Save` (`#saveBtn`) and `Load` (`#loadBtn`).
-2. Add a slot selector (`#saveSlotSelect`, values 1–5), `Save slot` (`#saveSlotBtn`), and `Load slot` (`#loadSlotBtn`).
-3. Add `#autosaveSelect` with values 0, 60, 180, 300, and 600 seconds (Off, 1, 3, 5, or 10 minutes). The default is 5 minutes. These controls use local browser storage.
-4. Keep the toolbar above the canvas and style its selects, for example with `#rs{z-index:8}` and `#rs select{box-sizing:border-box;max-width:70px;padding:3px 6px;border:1px solid var(--edge);border-radius:6px;background:rgba(40,28,18,.9);color:var(--ink);font:12px Georgia,serif}`.
-5. Apply these small host helper changes so load can refresh the full grid without leaving old occupied cells cached:
+1. Inside the existing `#rs` toolbar, keep or add the following controls after the wave button. When upgrading the 1.0.0 draft, do not add duplicate `saveBtn`/`loadBtn` controls:
 
-   - Change `gridCell(i)` to accept an optional `invalidate=true` argument and update `compDirty`/`GRIDV` only when true.
-   - Add `rebuildPlacementGrid()`, looping over all `N*N` cells with `gridCell(i,false)`, then setting `compDirty=true` and incrementing `GRIDV` once.
-   - Add `groupComponent(g)` using `nearestWalk(g.hx|0,g.hy|0)` and the resulting `comp` cell.
-   - Extract the existing finished-building output calculation into `buildingIncome()`; call it from `stepSim(dt)` to update `G.inc`.
+   ```html
+   <button id="saveBtn" type="button" title="Save this Survival session">Save</button>
+   <button id="loadBtn" type="button" title="Load the last manual save (or autosave)">Load</button>
+   <label for="saveSlotSelect">Slot</label>
+   <select id="saveSlotSelect" aria-label="Save slot"><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select>
+   <button id="saveSlotBtn" type="button" title="Save this Survival session to the selected slot">Save slot</button>
+   <button id="loadSlotBtn" type="button" title="Load the selected save slot">Load slot</button>
+   <label for="autosaveSelect">Autosave</label>
+   <select id="autosaveSelect" aria-label="Autosave interval"><option value="0">Off</option><option value="60">1 min</option><option value="180">3 min</option><option value="300">5 min</option><option value="600">10 min</option></select>
+   ```
 
-   Keep the existing terrain, obstacle, and occupancy rules inside `gridCell`. Loading clears occupancy and rebuilds the complete placement/path grid before refreshing UI.
+2. In the existing toolbar CSS, add the following declarations so the controls stay above the canvas and the selects match the game theme:
+
+   ```css
+   #rs{pointer-events:auto;display:flex;align-items:center;gap:12px;z-index:8}
+   #rs select{box-sizing:border-box;max-width:70px;padding:3px 6px;border:1px solid var(--edge);border-radius:6px;background:rgba(40,28,18,.9);color:var(--ink);font:12px Georgia,serif}
+   #rs select option{background:#1a1208;color:var(--ink)}
+   ```
+
+3. Replace the existing `gridCell(i)` helper with this form. It keeps the host placement rule and lets a full-grid rebuild invalidate the derived grids once:
+
+   ```js
+   function gridCell(i,invalidate=true){const f=L[i]>=1&&!blk[i]&&!occ[i]?1:0;walk[i]=f;GRID.buildable[i]=f;if(invalidate){compDirty=true;GRIDV++}}
+   function rebuildPlacementGrid(){for(let i=0;i<N*N;i++)gridCell(i,false);compDirty=true;GRIDV++}
+   ```
+
+   Add these helpers beside `nearestWalk` and `stepSim`:
+
+   ```js
+   function groupComponent(g){const c=nearestWalk(g.hx|0,g.hy|0);return c?comp[c[1]*N+c[0]]:0}
+   function buildingIncome(){const inc={wood:0,stone:0,iron:0,gold:0};for(const b of B){if(b.p<1||!b.out)continue;for(const k of RESN)inc[k]+=b.out[k]}return inc}
+   ```
+
+   Replace the old inline building-income calculation in `stepSim(dt)` with this exact line:
+
+   ```js
+   G.inc=buildingIncome();/* G.inc = derived output from finished active buildings per 8 h */
+   ```
+
+   Loading clears occupancy and rebuilds the complete placement/path grid before refreshing UI. Keep the host terrain, obstacle, and occupancy rule inside `gridCell` unchanged.
+
+4. Insert the marked source block after `initSurvival()` in the same script scope. It registers the controls and adds a one-second autosave scheduler; it does not add a second simulation loop.
+
+5. Open the game with `?saveLoadTest=1`. Confirm the result panel reports all 21 checks passed.
+
 6. Insert the marked source block after `initSurvival()` in the same script scope. It registers existing buttons and adds a one-second autosave scheduler; it does not add a second simulation loop.
 7. Open the game with `?saveLoadTest=1`. Confirm the result panel reports all 21 checks passed.
 
