@@ -1,0 +1,114 @@
+<!-- ===== FEATURE: CONTROL-GROUPS-V2 START (id: CTRLGROUPS-2.0.0) =====
+ Supersedes CTRLGROUPS-1.0.0 (delete that block; both cannot run together).
+ Keys   : Ctrl/Cmd+1-9 assign the current selection · 1-9 recall (press again / group off-screen = also centre the camera)
+          Shift+1-9 stays the host's build shortcuts · Space = pause (host, unchanged) · + / - = game speed (this file)
+ Rules  : an entity (unit OR building) is in at most ONE group; assigning moves it; dead/destroyed entities drop out; empty group = no-op.
+ Mixed  : the host only ever holds units (SU) OR one building (SB). This block adds building multi-select (SELB; SB is always SELB[0]) and
+          Shift+click on a building adds it to the current selection, so unit+building selections now exist and can be grouped.
+ Touches: no existing function is edited. Wraps clickSel / boxSel / uiUpdate. REQUIRES three host removals (see handoff): the 1/2/3 speed keys and
+          the + / - zoom keys are removed from the host keydown handler (zoom stays on Q/E and the wheel); this file adds + / - speed.
+ API    : window.FEATURE_CTRLGROUPS_V2 { assign, recall, get, groupOf, clear, selectedBuildings, cfg }
+-->
+<style id="feature-ctrlgroups2-css">
+#cg-bar{position:absolute;left:12px;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;gap:4px;z-index:5;pointer-events:auto;user-select:none;-webkit-user-select:none}
+#cg-bar .cg-hint{font:10.5px Georgia,serif;color:var(--ink);opacity:.5;max-width:104px;line-height:1.3;pointer-events:none}
+#cg-bar button{all:unset;box-sizing:border-box;cursor:pointer;display:flex;align-items:center;gap:7px;min-width:70px;padding:4px 9px;font:12px Georgia,serif;color:var(--ink);background:var(--panel);border:1px solid var(--edge);border-radius:6px;backdrop-filter:blur(3px)}
+#cg-bar button b{color:#ffcf7a;letter-spacing:.05em;font-size:13px}
+#cg-bar button span{font-variant-numeric:lining-nums tabular-nums}
+#cg-bar button em{font-style:normal;opacity:.65;font-size:10.5px}
+#cg-bar button:hover{background:rgba(80,54,28,.85)}
+#cg-bar button.on{border-color:#ffcf7a;background:rgba(110,70,30,.9);box-shadow:0 0 10px rgba(255,170,70,.4)}
+</style>
+<script id="feature-ctrlgroups2">
+(()=>{
+'use strict';
+const ID='CTRLGROUPS-2.0.0';
+const CFG={
+ clearOnEmptyAssign:true,   /* Ctrl+n with nothing selected empties group n (standard RTS). false = do nothing */
+ centreMargin:.12,          /* recall also centres the camera when the group's centroid is within this fraction of a screen edge (or off-screen) */
+ speedKeys:true,            /* + / - change game speed (1..maxSpeed). While paused they change the resume speed */
+ maxSpeed:3
+};
+const HOST={SU:typeof SU,SB:typeof SB,U:typeof U,B:typeof B,G:typeof G,cam:typeof cam,X:typeof X,Y:typeof Y,W:typeof W,H:typeof H,toast:typeof toast,clickSel:typeof clickSel,boxSel:typeof boxSel,uiUpdate:typeof uiUpdate,setSpeed:typeof setSpeed,bHit:typeof bHit};
+const missing=Object.keys(HOST).filter(k=>HOST[k]==='undefined');
+if(missing.length){console.warn('['+ID+'] disabled: host globals missing: '+missing.join(', '));return}
+const groups=Array.from({length:10},()=>[]),owner=new Map();let SELB=[],lastSB=null;
+const isB=e=>!!e.type,alive=e=>!e.dead&&(isB(e)?B.includes(e):U.includes(e));
+const say=m=>{try{toast(m)}catch(e){}};
+/* ---------- selection plumbing: SELB = all selected buildings, SB = SELB[0] (what the host's building panel uses) ---------- */
+function sync(){
+ SELB=SELB.filter(b=>!b.dead&&B.includes(b));
+ const gone=lastSB&&(lastSB.dead||!B.includes(lastSB));
+ if(SB&&(SB.dead||!B.includes(SB)))SB=null;
+ if(SB===null){if(lastSB&&!gone)SELB=[];else if(gone&&SELB.length)SB=SELB[0];else SELB=[]}   /* null because the host deselected -> clear; null because the primary died -> promote the next one */
+ if(SB&&!SELB.includes(SB))SELB=[SB];                                                            /* the host selected a different building */
+ lastSB=SB}
+const setSelection=(units,blds)=>{SU=units.slice();SELB=blds.slice();SB=SELB[0]||null;lastSB=SB};
+/* ---------- groups ---------- */
+let pt=0;function prune(force){const now=performance.now();if(!force&&now-pt<100)return;pt=now;for(let n=1;n<10;n++){const g=groups[n];for(let i=g.length-1;i>=0;i--)if(!alive(g[i])){owner.delete(g[i]);g.splice(i,1)}}}
+const live=n=>{prune(true);return groups[n].slice()};
+function clear(n){for(const e of groups[n])owner.delete(e);groups[n]=[];draw(true)}
+function assign(n){
+ sync();prune(true);const ents=[...SU.filter(alive),...SELB.filter(alive)];
+ if(!ents.length){if(CFG.clearOnEmptyAssign&&groups[n].length){clear(n);say('Group '+n+' cleared')}return false}
+ const keep=new Set(ents);for(const e of groups[n])if(!keep.has(e))owner.delete(e);
+ groups[n]=[];
+ for(const e of ents){const o=owner.get(e);if(o&&o!==n)groups[o]=groups[o].filter(x=>x!==e);owner.set(e,n);groups[n].push(e)}   /* one group per entity: leaving the old group is automatic */
+ const u=ents.filter(e=>!isB(e)).length,b=ents.length-u;
+ say('Group '+n+' set · '+(u?u+(u>1?' units':' unit'):'')+(u&&b?' + ':'')+(b?b+(b>1?' buildings':' building'):''));
+ draw(true);return true}
+const pos=e=>isB(e)?[e.x+e.w/2,e.y+e.w/2]:[e.x,e.y];
+function centroid(l){let x=0,y=0;for(const e of l){const p=pos(e);x+=p[0];y+=p[1]}return[x/l.length,y/l.length]}
+const offscreen=c=>{const sx=(X(c[0],c[1])-cam.x)*cam.z+W/2,sy=(Y(c[0],c[1],1)-cam.y)*cam.z+H/2,m=CFG.centreMargin;return sx<W*m||sx>W*(1-m)||sy<H*m||sy>H*(1-m)};
+const centreOn=c=>{cam.tx=X(c[0],c[1]);cam.ty=Y(c[0],c[1],1)-10};   /* the host loop clamps and eases cam.tx/ty */
+function same(units,blds){return SU.length===units.length&&units.every(u=>SU.includes(u))&&SELB.length===blds.length&&blds.every(b=>SELB.includes(b))}
+function recall(n,forceCentre){
+ sync();const l=live(n);if(!l.length)return false;                       /* empty / invalid group: nothing happens */
+ const units=l.filter(e=>!isB(e)),blds=l.filter(isB),again=same(units,blds),c=centroid(l);
+ setSelection(units,blds);
+ if(forceCentre||again||offscreen(c))centreOn(c);                        /* "again" = pressing the group that is already selected */
+ draw(true);return true}
+/* ---------- keys (capture phase: runs before the host handler) ---------- */
+const typing=e=>/INPUT|TEXTAREA|SELECT/.test((e.target&&e.target.tagName)||'');
+addEventListener('keydown',e=>{
+ if(e.repeat||typing(e))return;
+ const m=/^Digit([1-9])$/.exec(e.code);
+ if(m){const n=+m[1];
+  if(e.ctrlKey||e.metaKey){e.preventDefault();e.stopImmediatePropagation();assign(n);return}
+  if(e.shiftKey||e.altKey)return;                                        /* Shift+1-9 = host build shortcuts, untouched */
+  e.preventDefault();e.stopImmediatePropagation();recall(n);return}      /* stopImmediatePropagation: a host that still has 1/2/3 = speed can no longer see these keys */
+ if(CFG.speedKeys&&!e.ctrlKey&&!e.metaKey&&!e.altKey){
+  const up=e.key==='+'||e.key==='='||e.code==='NumpadAdd',dn=e.key==='-'||e.key==='_'||e.code==='NumpadSubtract';
+  if(up||dn){e.preventDefault();e.stopImmediatePropagation();speedStep(up?1:-1)}}
+},true);
+function speedStep(d){
+ const run=G.speed>0,cur=run?G.speed:(G.prevSpeed||1),nx=Math.max(1,Math.min(CFG.maxSpeed,cur+d));
+ if(run){setSpeed(nx);say('Game speed '+nx+'×')}else{G.prevSpeed=nx;say('Resume speed '+nx+'× (Space to resume)')}}
+for(const b of document.querySelectorAll('#sp button')){const s=b.dataset.s;b.title=s==='0'?'Pause [Space]':'Speed '+s+'× [+ / −]'}   /* the buttons stay; only their key hints change */
+/* ---------- shift-click / shift-box keep buildings in the selection => mixed selections ---------- */
+const _click=window.clickSel,_box=window.boxSel,_ui=window.uiUpdate;
+function pickUnit(sx,sy){const z=cam.z,wx=(sx-W/2)/z+cam.x,wy=(sy-H/2)/z+cam.y,rad=Math.max(16,12/z);let bu=null,bd=rad;for(const u of U){const d=Math.hypot(X(u.x,u.y)-wx,Y(u.x,u.y,1)-14-wy);if(d<bd){bd=d;bu=u}}return bu}
+window.clickSel=function(sx,sy,add){
+ if(!add)return _click(sx,sy,add);
+ sync();const keepB=SELB.slice(),z=cam.z,wx=(sx-W/2)/z+cam.x,wy=(sy-H/2)/z+cam.y;
+ if(pickUnit(sx,sy)){_click(sx,sy,add);SELB=keepB.filter(b=>!b.dead);SB=SELB[0]||null;lastSB=SB;return}   /* host would drop the building(s) when a unit is shift-added */
+ const b=bHit(wx,wy);
+ if(b){SELB=SELB.includes(b)?SELB.filter(x=>x!==b):[...SELB,b];SB=SELB[0]||null;lastSB=SB;return}         /* host would replace the selection and drop the units */
+ _click(sx,sy,add)};
+window.boxSel=function(b,add){sync();const keepB=add?SELB.slice():[];_box(b,add);if(add&&keepB.length){SELB=keepB;SB=SELB[0];lastSB=SB}};
+window.uiUpdate=function(){sync();prune(false);_ui();draw(false)};
+/* ---------- chips ---------- */
+const bar=document.createElement('div');bar.id='cg-bar';document.body.appendChild(bar);let sig='';
+function draw(force){
+ const parts=[];for(let n=1;n<10;n++){const g=groups[n];if(!g.length)continue;const u=g.filter(e=>!isB(e)).length,b=g.length-u;parts.push(n+':'+u+'/'+b+(isSel(g)?'*':''))}
+ const s=parts.join('|');if(!force&&s===sig)return;sig=s;bar.textContent='';
+ if(!parts.length){const h=document.createElement('div');h.className='cg-hint';h.textContent='Ctrl+1–9 sets a control group · 1–9 selects it';bar.appendChild(h);return}
+ for(let n=1;n<10;n++){const g=groups[n];if(!g.length)continue;const u=g.filter(e=>!isB(e)).length,b=g.length-u,btn=document.createElement('button');
+  btn.className=isSel(g)?'on':'';btn.title='Group '+n+': '+(u?u+' unit'+(u>1?'s':''):'')+(u&&b?', ':'')+(b?b+' building'+(b>1?'s':''):'')+' — click: select · click again / double-click: centre camera · Ctrl+'+n+': reassign';
+  btn.innerHTML='<b>'+n+'</b><span>'+g.length+'×</span>'+(b?'<em>'+(u?u+'u+':'')+b+'b</em>':'');btn.onclick=()=>recall(n);btn.ondblclick=()=>recall(n,true);bar.appendChild(btn)}}
+const isSel=g=>g.length===SU.length+SELB.length&&g.every(e=>isB(e)?SELB.includes(e):SU.includes(e));
+draw(true);
+window.FEATURE_CTRLGROUPS_V2={id:ID,cfg:CFG,assign,recall,get:n=>live(n),groupOf:e=>owner.get(e)||0,clear,selectedBuildings:()=>{sync();return SELB.slice()},speedStep};
+})();
+</script>
+<!-- ===== FEATURE: CONTROL-GROUPS-V2 END (id: CTRLGROUPS-2.0.0) ===== -->

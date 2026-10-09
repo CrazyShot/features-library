@@ -1,0 +1,8 @@
+name: repo-guard
+on: [pull_request, push]
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash tools/check-repo.sh

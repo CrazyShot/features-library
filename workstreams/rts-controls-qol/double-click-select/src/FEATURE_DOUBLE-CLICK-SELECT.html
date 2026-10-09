@@ -1,0 +1,43 @@
+<!-- ===== FEATURE: DOUBLE-CLICK-SELECT START (id: DBLCLICK-SELECT-1.0.0) =====
+ Double-click a unit -> select the nearby units of the SAME type and SAME owner.
+   Dwarf Warrior -> Dwarf Warriors · Ranger -> Rangers · Vampire (enemy) -> visible Vampires (inspect-only, via UNIT-INFO-PANEL; ignored if that feature is absent)
+ "Nearby" = currently on screen AND within cfg.maxTiles of the clicked unit (never the whole map).  Shift+double-click adds to the current selection.
+ Fog of war: enemies are only ever picked if the host's own pickEnemy()/fogVis() lets you see them; friendly units are your own.
+ Touches: no existing function is edited. Wraps clickSel only.   Soft dependency: FEATURE_UNIT_INFO (enemy double-click).
+-->
+<script id="feature-dblclick">
+(()=>{
+'use strict';
+const ID='DBLCLICK-SELECT-1.0.0';
+const CFG={windowMs:380,slopPx:10,maxTiles:30,onScreenOnly:true,toast:true};
+const HOST={SU:typeof SU,SB:typeof SB,U:typeof U,E:typeof E,cam:typeof cam,X:typeof X,Y:typeof Y,W:typeof W,H:typeof H,clickSel:typeof clickSel,fogVis:typeof fogVis};
+const missing=Object.keys(HOST).filter(k=>HOST[k]==='undefined');
+if(missing.length){console.warn('['+ID+'] disabled: host globals missing: '+missing.join(', '));return}
+const _click=window.clickSel;let prev=null;
+const say=m=>{try{if(CFG.toast)toast(m)}catch(e){}};
+/* same hit test the host uses for its own unit click (radius max(16,12/zoom), centred 14px above the feet) */
+function pickFriendly(sx,sy){const z=cam.z,wx=(sx-W/2)/z+cam.x,wy=(sy-H/2)/z+cam.y,rad=Math.max(16,12/z);let bu=null,bd=rad;for(const u of U){if(u.dead)continue;const d=Math.hypot(X(u.x,u.y)-wx,Y(u.x,u.y,1)-14-wy);if(d<bd){bd=d;bu=u}}return bu}
+const onScreen=e=>{const sx=(X(e.x,e.y)-cam.x)*cam.z+W/2,sy=(Y(e.x,e.y,1)-14-cam.y)*cam.z+H/2;return sx>=0&&sx<=W&&sy>=0&&sy<=H};
+const typeKey=e=>e.en?'enemy':e.kind;                      /* owner is implied by the array it lives in: U = yours, E = enemy */
+function nearby(hit){
+ const pool=hit.en?E:U,out=[];
+ for(const e of pool){if(e.dead||typeKey(e)!==typeKey(hit))continue;
+  if(Math.hypot(e.x-hit.x,e.y-hit.y)>CFG.maxTiles)continue;
+  if(CFG.onScreenOnly&&!onScreen(e))continue;
+  if(hit.en&&!fogVis(e.x,e.y))continue;                    /* fog of war: only what you can currently see */
+  out.push(e)}
+ return out}
+window.clickSel=function(sx,sy,add){
+ _click(sx,sy,add);                                        /* the normal single click (and enemy inspect, if present) always happens first */
+ const now=performance.now();let hit=pickFriendly(sx,sy);
+ if(!hit&&typeof pickEnemy==='function')hit=pickEnemy(sx,sy);
+ if(hit&&prev&&typeKey(prev.hit)===typeKey(hit)&&!!prev.hit.en===!!hit.en&&now-prev.t<CFG.windowMs&&Math.hypot(sx-prev.x,sy-prev.y)<=CFG.slopPx){
+  prev=null;const list=nearby(hit);
+  if(hit.en){const api=window.FEATURE_UNIT_INFO;if(api&&api.setInspect){api.setInspect(add?[...api.inspect(),...list.filter(e=>!api.inspect().includes(e))]:list);say('Selected '+list.length+' enem'+(list.length>1?'ies':'y')+' (inspect)')}return}
+  SB=null;SU=add?[...new Set([...SU,...list])]:list;
+  say('Selected '+list.length+' '+(hit.kind==='ranger'?'Ranger':'Dwarf Warrior')+(list.length>1?'s':''));return}
+ prev=hit?{hit,t:now,x:sx,y:sy}:null};
+window.FEATURE_DBLCLICK_SELECT={id:ID,cfg:CFG,nearby};
+})();
+</script>
+<!-- ===== FEATURE: DOUBLE-CLICK-SELECT END (id: DBLCLICK-SELECT-1.0.0) ===== -->

@@ -1,0 +1,29 @@
+name: Feature task
+description: One task for one feature (check the Project and FEATURE_INDEX.md for duplicates first)
+labels: ["feature"]
+body:
+  - type: checkboxes
+    attributes:
+      label: Before you file
+      options:
+        - label: I checked the Project, open Issues and FEATURE_INDEX.md; this is not a duplicate
+          required: true
+  - type: input
+    attributes: {label: Feature ID, placeholder: "NAME-1.0.0"}
+    validations: {required: true}
+  - type: dropdown
+    attributes:
+      label: Workstream
+      options: [combat-ai, rts-controls-qol, waves-survival, environment-visuals, testing-debug-tools, economy-production, research-progression, save-load-session, map-data-integration, performance-rendering]
+    validations: {required: true}
+  - type: input
+    attributes: {label: Feature path, placeholder: "workstreams/<workstream>/<feature-slug>"}
+  - type: textarea
+    attributes: {label: Goal and scope, description: "What it does and what it must NOT touch"}
+    validations: {required: true}
+  - type: textarea
+    attributes: {label: Dependencies and host touch points, description: "Other features / host functions it relies on or wraps"}
+  - type: input
+    attributes: {label: Target game revision}
+  - type: textarea
+    attributes: {label: Acceptance criteria / tests}

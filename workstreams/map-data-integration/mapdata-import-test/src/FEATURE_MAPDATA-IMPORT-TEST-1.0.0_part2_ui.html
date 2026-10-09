@@ -1,0 +1,97 @@
+<!-- ===== FEATURE: MAPDATA-IMPORT-TEST START (part 2/2: dev panel + verify + overlay; goes AFTER the main game script) (id: MAPDATA-IMPORT-TEST-1.0.0) =====
+ Reads  : window.BASTION_IMPORT / BASTION_IMPORT_API (part 1/2, which runs BEFORE the main script and seeds N / terrain / trees / resources / HQ through 8 tiny guarded hooks).
+ Adds   : a dev panel (load MapData file, bundled test map, 192 crop, back to procedural), a hover inspector, a debug overlay and an in-game self-verification.
+ Modifies nothing else: wraps drawWorld() only for the overlay; adds GRID.mapdata. Everything here is inert when no import is active (except the panel itself).
+-->
+<style id="feature-mapdata-import-css">
+#mdi-panel{left:12px;top:206px;pointer-events:auto;z-index:6;font:12px Georgia,serif;width:236px;line-height:1.35}
+#mdi-panel b{letter-spacing:.14em;color:#9ad7ff;font-size:12px}
+#mdi-panel .mdi-h{display:flex;justify-content:space-between;align-items:center}
+#mdi-panel button{all:unset;cursor:pointer;box-sizing:border-box;padding:3px 7px;border:1px solid var(--edge);border-radius:5px;background:rgba(40,28,18,.78);color:var(--ink);font:11.5px Georgia,serif;text-align:center}
+#mdi-panel button:hover{background:rgba(110,70,30,.9)}#mdi-panel button.on{border-color:#9ad7ff}
+#mdi-panel .r{display:flex;gap:4px;margin-top:4px}#mdi-panel .r button{flex:1}
+#mdi-panel .st{margin-top:5px;font-size:10.8px;opacity:.88;white-space:pre-wrap;word-break:break-word}
+#mdi-panel .bad{color:#ff9a8a}#mdi-panel .good{color:#a6e8a0}
+#mdi-panel.min .mdi-b{display:none}
+</style>
+<script id="feature-mapdata-import-ui">
+(()=>{
+'use strict';
+const API=window.BASTION_IMPORT_API,IMP=window.BASTION_IMPORT;
+if(!API){console.warn('[MAPDATA-IMPORT-TEST] boot block missing: panel disabled');return}
+const HOST={N:typeof N,blk:typeof blk,TREEG:typeof TREEG,RES:typeof RES,RESI:typeof RESI,B:typeof B,GRID:typeof GRID,DEP:typeof DEP,X:typeof X,Y:typeof Y,cam:typeof cam,g:typeof g,pickTile:typeof pickTile,drawWorld:typeof drawWorld,dpr:typeof dpr,W:typeof W,H:typeof H,mouse:typeof mouse,TW:typeof TW,TH:typeof TH,OX:typeof OX,OY:typeof OY};
+for(const n in HOST)if(HOST[n]==='undefined')console.warn('[MAPDATA-IMPORT-TEST] host global missing: '+n+' (panel limited)');
+const P=document.createElement('div');P.id='mdi-panel';P.className='p';
+P.innerHTML='<div class="mdi-h"><b>MAPDATA IMPORT</b><button data-a="min" title="collapse">–</button></div><div class="mdi-b"><div class="st" id="mdi-st"></div>'+
+ '<div class="r"><button data-a="file" title="Pick a Terrain Generator MapData .json (square map). It is staged and the game reloads with it.">Load MapData…</button><button data-a="proc">Procedural</button></div>'+
+ '<div class="r"><button data-a="emb">Bundled 256</button><button data-a="crop" title="192×192 centre crop of the bundled 256 map (synthetic scale test, not a generator output)">Crop 192</button></div>'+
+ '<div class="r"><button data-a="ov">Overlay: off</button><button data-a="verify">Verify</button></div><div class="st" id="mdi-hv"></div><div class="st" id="mdi-vr"></div>'+
+ '<input id="mdi-file" type="file" accept=".json,application/json" style="display:none"></div>';
+document.body.appendChild(P);
+const $=id=>P.querySelector('#'+id),stEl=$('mdi-st'),hv=$('mdi-hv'),vr=$('mdi-vr');
+const esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+function status(){if(IMP){const c=IMP.counts;stEl.innerHTML='<span class="good">IMPORTED</span> '+esc(IMP.seedText)+' · '+IMP.w+'×'+IMP.h+(IMP.synthetic?' (synthetic crop)':'')+'\nfp '+esc(IMP.fp)+' · '+esc(API.label)+'\ntrees '+IMP.raw.tm.reduce((a,b)=>a+b,0)+' · nodes '+IMP.raw.nodes.length+' (stone '+(c[1]||0)+' · iron '+(c[2]||0)+' · gold '+(c[3]||0)+')'}
+ else stEl.innerHTML='Procedural map (original generator).'+(API.error?'\n<span class="bad">'+esc(API.error)+'</span>':'')}
+status();
+function go(){try{const u=new URL(location.href);u.searchParams.delete('map');location.href=u.toString()}catch(e){location.reload()}}
+const fail=m=>{vr.innerHTML='<span class="bad">'+esc(m)+'</span>'};
+P.addEventListener('pointerdown',e=>e.stopPropagation());
+P.addEventListener('click',async ev=>{const b=ev.target.closest('button');if(!b)return;const a=b.dataset.a;b.blur();
+ if(a==='min')P.classList.toggle('min');
+ else if(a==='file')$('mdi-file').click();
+ else if(a==='proc'){API.clear();go()}
+ else if(a==='emb'){if(!API.embeddedSize)return fail('this build has no bundled map');API.stage({kind:'embedded'});go()}
+ else if(a==='crop'){if(!API.embeddedSize)return fail('this build has no bundled map');API.stage({kind:'crop192'});go()}
+ else if(a==='ov')setOv((OV+1)%MODES.length);
+ else if(a==='verify')verify()});
+$('mdi-file').addEventListener('change',async e=>{const f=e.target.files[0];if(!f)return;vr.textContent='reading '+f.name+' …';
+ try{const d=JSON.parse(await f.text()),c=API.compact(d);if(!API.stage({kind:'file',name:f.name,data:c}))return fail('browser storage unavailable: cannot stage the file across the reload');go()}catch(err){fail(String(err.message||err))}});
+/* ---------------- hover inspector: what does the MapData say about the tile under the mouse? ---------------- */
+if(IMP){const NN=IMP.w;
+ setInterval(()=>{try{if(!mouse||!mouse.in){return}const z=cam.z,ox=W/2-cam.x*z,oy=H/2-cam.y*z,k=pickTile((mouse.x-ox)/z,(mouse.y-oy)/z);if(!k){hv.textContent='';return}
+  const x=k[0],y=k[1],i=y*NN+x,d=IMP.depId[i]-1,rs=IMP.RT[i]?['','stone','iron'][IMP.RT[i]]:'',gd=IMP.goldNodes.some(q=>q.x===x&&q.y===y);
+  hv.textContent='tile ('+x+','+y+') · '+(IMP.tm[i]?'tree':'open')+' · ground '+IMP.ground[i]+(IMP.perim[i]?' · wave-perimeter':'')+(rs?' · '+rs+' node':'')+(gd?' · gold node':'')+(d>=0?' · deposit #'+d:'')}catch(e){}},200)}
+/* ---------------- debug overlay (verification aid, not a generator-view clone) ---------------- */
+const MODES=['off','ground','perimeter','nodes','tree diff'];let OV=0;
+function setOv(i){OV=i;P.querySelector('[data-a=ov]').textContent='Overlay: '+MODES[OV];P.querySelector('[data-a=ov]').classList.toggle('on',!!OV)}
+if(IMP&&typeof drawWorld==='function'){const _dw=window.drawWorld;
+ window.drawWorld=function(T,z,ox,oy){_dw(T,z,ox,oy);if(!OV)return;const NN=IMP.w,m=MODES[OV];
+  g.save();g.setTransform(dpr*z,0,0,dpr*z,dpr*ox,dpr*oy);
+  let a0=1e9,a1=-1e9,b0=1e9,b1=-1e9;for(const[px,py]of[[-ox/z,-oy/z],[(W-ox)/z,-oy/z],[-ox/z,(H-oy)/z],[(W-ox)/z,(H-oy)/z]]){const u=(px-OX)/TW,v=(py-OY)/TH,a=(u+v)/2,b=(v-u)/2;a0=Math.min(a0,a);a1=Math.max(a1,a);b0=Math.min(b0,b);b1=Math.max(b1,b)}
+  a0=Math.max(0,Math.floor(a0)-1);b0=Math.max(0,Math.floor(b0)-1);a1=Math.min(NN,Math.ceil(a1)+1);b1=Math.min(NN,Math.ceil(b1)+1);
+  const P1=new Path2D(),P2=new Path2D(),P3=new Path2D(),cell=(p,x,y)=>{p.moveTo(X(x,y),Y(x,y,1));p.lineTo(X(x+1,y),Y(x+1,y,1));p.lineTo(X(x+1,y+1),Y(x+1,y+1,1));p.lineTo(X(x,y+1),Y(x,y+1,1));p.closePath()};
+  for(let y=b0;y<b1;y++)for(let x=a0;x<a1;x++){const i=y*NN+x;
+   if(m==='ground'){if(IMP.ground[i])cell(P1,x,y)}
+   else if(m==='perimeter'){if(IMP.perim[i])cell(P1,x,y)}
+   else if(m==='nodes'){const t=IMP.RT[i];if(t===1)cell(P1,x,y);else if(t===2)cell(P2,x,y)}
+   else if(m==='tree diff'){if(!!blk[i]!==!!IMP.tm[i])cell(P1,x,y);else if(IMP.tm[i])cell(P3,x,y)}}
+  if(m==='nodes'){for(const q of IMP.goldNodes)if(q.x>=a0&&q.x<a1&&q.y>=b0&&q.y<b1)cell(P3,q.x,q.y)}
+  const col=m==='ground'?'rgba(255,170,60,.38)':m==='perimeter'?'rgba(90,170,255,.38)':m==='nodes'?'rgba(235,235,255,.62)':'rgba(255,40,40,.75)';
+  g.fillStyle=col;g.fill(P1);if(m==='nodes'){g.fillStyle='rgba(255,130,60,.7)';g.fill(P2);g.fillStyle='rgba(255,215,60,.75)';g.fill(P3)}if(m==='tree diff'){g.fillStyle='rgba(60,255,120,.18)';g.fill(P3)}
+  if(IMP.raw.hq){const h=IMP.raw.hq;g.strokeStyle='#ff4dd2';g.lineWidth=2;g.beginPath();g.moveTo(X(h[0]-8,h[1]),Y(h[0]-8,h[1],1));for(let k=0;k<=48;k++){const a=k/48*6.283,u=h[0]+.5+Math.cos(a)*8,v=h[1]+.5+Math.sin(a)*8;g.lineTo(X(u,v),Y(u,v,1))}g.stroke()}
+  g.restore()}}
+/* ---------------- in-game self-verification ---------------- */
+function verify(){
+ if(!IMP){vr.innerHTML='<span class="bad">no import active</span>';return null}
+ const res=IMP.verify({N,blk,TREEG,RES,RESI,B}),L=[],ok=(n,c,x)=>{L.push((c?'<span class="good">✓</span> ':'<span class="bad">✗</span> ')+n+(x!==undefined?' '+x:''));return c};
+ let all=true;
+ all&=ok('N = '+res.N+' (MapData '+res.expectedN+')',res.N===res.expectedN);
+ all&=ok('TW×TH = '+TW+'×'+TH+' (unchanged)',TW===32&&TH===24);
+ all&=ok('tree tiles: missing '+res.treeTilesMissing+' · extra '+res.treeTilesExtra+' · blk mismatch '+res.blkMismatch+' · TREEG≠1 '+res.treegNot1,res.treeTilesMissing+res.treeTilesExtra+res.blkMismatch+res.treegNot1===0);
+ all&=ok('stone/iron tiles: type mismatch '+res.resTypeMismatch+' · RESI mismatch '+res.resiMismatch+' · extra '+res.resOnNonNode,res.resTypeMismatch+res.resiMismatch+res.resOnNonNode===0);
+ all&=ok('gold nodes kept out of RES: '+res.goldInRES,res.goldInRES===0);all&=ok('trees on resource tiles: '+res.treeOnResource,res.treeOnResource===0);
+ /* projection round trip: tile -> world (X,Y) -> pickTile == same tile, for every tile corner/centre sample */
+ let bad=0,tot=0;const s=Math.max(1,IMP.w>>5);for(let y=0;y<IMP.w;y+=s)for(let x=0;x<IMP.w;x+=s){const k=pickTile(X(x+.5,y+.5),Y(x+.5,y+.5,1));tot++;if(!k||k[0]!==x||k[1]!==y)bad++}
+ all&=ok('iso round trip tile→X,Y→pickTile: '+(tot-bad)+'/'+tot,bad===0);
+ if(res.hq){const c=res.hq.centre,src=res.hq.src;all&=ok('HQ footprint '+res.hq.w+'×'+res.hq.w+' at ('+res.hq.x+','+res.hq.y+'), centre ('+c[0]+','+c[1]+') vs MapData tile ('+src+')',src&&Math.abs(c[0]-(src[0]+.5))<=.5&&Math.abs(c[1]-(src[1]+.5))<=.5)}
+ /* deposits: every MapData stone/iron deposit must live inside ONE game deposit (DEP flood-fill); several MapData deposits may merge (game rule: ground within 2 tiles = one deposit) */
+ const m=new Map();for(const q of IMP.raw.nodes)if(q.t===1||q.t===2){const d=DEP[q.y*IMP.w+q.x];if(!m.has(q.dep))m.set(q.dep,new Set());m.get(q.dep).add(d)}
+ let split=0;for(const v of m.values())if(v.size>1||v.has(0))split++;const gd=new Set();for(const v of m.values())for(const d of v)gd.add(d);
+ all&=ok('MapData stone/iron deposits '+m.size+' → game deposits '+gd.size+' ('+split+' split)',split===0);
+ vr.innerHTML=L.join('\n')+'\n'+(all?'<span class="good">ALL CHECKS PASSED</span>':'<span class="bad">SOME CHECKS FAILED</span>');
+ return{res,all:!!all,total:tot,badProj:bad,mapdataDeposits:m.size,gameDeposits:gd.size,split}}
+if(IMP&&typeof GRID!=='undefined')GRID.mapdata={seed:IMP.seed,seedText:IMP.seedText,fp:IMP.fp,w:IMP.w,depositId:IMP.depId,ground:IMP.ground,wavePerimeter:IMP.perim,goldNodes:IMP.goldNodes,source:IMP.raw};
+window.FEATURE_MAPDATA_IMPORT_TEST={ver:API.ver,active:!!IMP,verify,setOverlay:setOv,modes:MODES,api:API};
+})();
+</script>
+<!-- ===== FEATURE: MAPDATA-IMPORT-TEST END (part 2/2) (id: MAPDATA-IMPORT-TEST-1.0.0) ===== -->

@@ -1,0 +1,152 @@
+<!-- ===== FEATURE: BUILDING-REPAIR START (id: BUILDING-REPAIR-1.1.0) =====
+ Repair / Stop-repair for damaged, constructed buildings + a settlement-wide "Repair All" button.
+ Uses ONLY existing systems: building health is the existing b.hp / b.mh (no new health system); cost is charged from G.res using the existing COST table;
+ progress is driven by the game's own stepSim(dt) so pause and game speed apply automatically.
+ CHOSEN VALUES (all in CFG):
+   rate   : repairSeconds = 40  -> a building regains mh/40 HP per game-second (full repair from 0 HP = 40 s; a day phase is 55 s)
+   cost   : costFraction = 0.4  -> a full repair from 0 HP costs 40% of the build cost (every resource in COST[type]), scaled by the HP actually restored,
+            charged continuously in whole units. If a resource runs out the repair STOPS (nothing is left half-paid).
+   threat : threatRadius = 10 tiles (measured from the building's centre, checked PER BUILDING). Any enemy (wave or wilderness) inside the radius blocks
+            repair of THAT building only. 10 = just beyond tower range (TRNG 9) and wilderness vision (7.5): an enemy that close is about to engage.
+            An active repair is PAUSED (no healing, no charge) while an enemy is inside, and resumes by itself after the area has been clear for resumeDelay (1 s).
+ RULES: not on destroyed buildings · not at full HP · not while under construction (b.p<1) · not while enemies are within threatRadius ·
+        stops cleanly at full HP, when destroyed, when the building leaves B (e.g. a future sell/demolish), on game over, or on resource shortage.
+ REPAIR ALL: one button above the build bar. Starts the normal repair on every damaged, completed, enemy-free building; skips full-HP, under-construction,
+        destroyed, and threatened ones, and ones the stockpile cannot start (each started building reserves 1 unit of each resource it needs, so a shared
+        shortage is detected up front). Costs / gradual healing / cancel are exactly the per-building system - nothing is healed instantly or free.
+ NO SELL EXISTS in the current game; "sold" is handled generically (any building that leaves B stops repairing and is forgotten).
+ Touches: no existing function is edited. Wraps stepSim (tick), uiUpdate (buttons), drawWorld (marker). Soft dependency: FEATURE_CTRLGROUPS_V2.
+ NOTE   : Repair All is NOT a child of #bar - the host loops over bar.children and reads dataset.k, so a foreign child would break it. It floats above the bar.
+ API    : window.FEATURE_BUILDING_REPAIR { start(b), stop(b), canRepair(b), why(b), cost(b), threat(b), repairAll(), status(), repairing(), cfg }
+-->
+<style id="feature-repair-css">
+#pn #repair-btn{display:none}#pn #repair-btn.dis{opacity:.5;cursor:default;pointer-events:none}#pn #repair-btn.on{background:rgba(60,120,56,.85)}#pn #repair-btn.warn{background:rgba(150,96,30,.9)}
+#repair-note{display:none;margin-top:5px;max-width:250px;font-size:11.5px;line-height:1.35;color:#ffb78a}
+#repair-all{position:fixed;z-index:6;display:none;pointer-events:auto;box-sizing:border-box;padding:5px 12px;border:1px solid var(--edge);border-radius:7px;background:rgba(40,28,18,.88);color:var(--ink);font:12px Georgia,serif;cursor:pointer;text-align:left;line-height:1.3;backdrop-filter:blur(3px)}
+#repair-all b{display:block;letter-spacing:.06em;color:#9fe08e}#repair-all small{display:block;opacity:.85;font-size:10.8px}
+#repair-all:hover{background:rgba(80,54,28,.92)}#repair-all.dis{opacity:.5;cursor:default}#repair-all.warn b{color:#ffb78a}
+</style>
+<script id="feature-repair">
+(()=>{
+'use strict';
+const ID='BUILDING-REPAIR-1.1.0';
+const CFG={repairSeconds:40,costFraction:.4,threatRadius:10,resumeDelay:1,marker:true,repairAllButton:true};
+const HOST={B:typeof B,E:typeof E,G:typeof G,COST:typeof COST,RESN:typeof RESN,BT:typeof BT,stepSim:typeof stepSim,uiUpdate:typeof uiUpdate,drawWorld:typeof drawWorld,toast:typeof toast,SB:typeof SB,X:typeof X,Y:typeof Y,g:typeof g,dpr:typeof dpr};
+const missing=Object.keys(HOST).filter(k=>HOST[k]==='undefined');
+if(missing.length||!document.getElementById('pn')||!document.getElementById('tr')){console.warn('['+ID+'] disabled: host globals missing: '+missing.join(', '));return}
+const $=id=>document.getElementById(id),say=m=>{try{toast(m)}catch(e){}};
+const ACTIVE=new Set(),NM=b=>BT[b.type].n,plural=(n,w)=>n+' '+w+(n===1?'':'s');
+const inGame=b=>!b.dead&&B.includes(b);
+/* ---------- enemy proximity (per building) ---------- */
+function threat(b){const cx=b.x+b.w/2,cy=b.y+b.w/2,R2=CFG.threatRadius*CFG.threatRadius;let n=0;
+ for(let i=0;i<E.length;i++){const e=E[i];if(e.dead)continue;const dx=e.x-cx,dy=e.y-cy;if(dx*dx+dy*dy<=R2)n++}return n}
+const nearMsg=n=>'Enemies nearby ('+n+' within '+CFG.threatRadius+' tiles) — repair unavailable until the area is clear';
+function why(b){
+ if(!b||!inGame(b))return'This building no longer exists';
+ if(G.state!=='play')return'Not available now';
+ if(b.p<1)return'Finish construction first';
+ if(!(b.hp<b.mh-1e-6))return'Already at full HP';
+ const n=threat(b);if(n)return nearMsg(n);
+ return''}
+const canRepair=b=>!why(b);
+function cost(b){const o={},rem=Math.max(0,(b.mh-b.hp)/b.mh);for(const r of RESN){const c=(COST[b.type]||{})[r]||0;if(c)o[r]=Math.ceil(c*CFG.costFraction*rem)}return o}
+const costText=o=>Object.entries(o).filter(([,v])=>v>0).map(([k,v])=>v+' '+k).join(' · ')||'free';
+function stop(b,reason){if(!ACTIVE.delete(b))return false;b._rp=null;if(reason==='done')say(NM(b)+' fully repaired');return true}
+/* start one building; `reserve` (optional) counts units already promised to buildings started in the same batch */
+function tryStart(b,reserve){
+ const w=why(b);if(w)return{ok:false,code:w.startsWith('Enemies')?'threat':w.startsWith('Finish')?'build':w.startsWith('Already')?'full':'gone',msg:w};
+ if(ACTIVE.has(b))return{ok:true,code:'active'};
+ const need=[];for(const r of RESN){const c=(COST[b.type]||{})[r]||0;if(c*CFG.costFraction>0)need.push(r)}
+ for(const r of need)if(G.res[r]-((reserve&&reserve[r])||0)<1)return{ok:false,code:'res',msg:'Not enough '+r+' to repair'};
+ if(reserve)for(const r of need)reserve[r]=(reserve[r]||0)+1;
+ b._rp={debt:{},paused:false,clear:0};ACTIVE.add(b);return{ok:true,code:'started'}}
+function start(b){const r=tryStart(b);if(!r.ok)say(r.msg);return r.ok}
+/* ---------- the tick: restore HP gradually, pay as it accrues; pause while enemies are inside the threat radius ---------- */
+const _step=window.stepSim;
+window.stepSim=function(dt){_step(dt);
+ const paused=[],noRes=[],done=[];
+ for(const b of [...ACTIVE]){
+  if(!inGame(b)||G.state!=='play'||b.p<1){stop(b,'gone');continue}                 /* destroyed / sold / game over: forget it cleanly */
+  if(!(b.hp<b.mh)){b.hp=b.mh;if(stop(b,'quiet'))done.push(b);continue}
+  const rp=b._rp;
+  if(threat(b)){if(!rp.paused){rp.paused=true;paused.push(b)}rp.clear=0;continue}     /* enemy inside the radius: no healing, no charge */
+  if(rp.paused){rp.clear+=dt;if(rp.clear<CFG.resumeDelay)continue;rp.paused=false}  /* resume only after the area stayed clear */
+  const gain=Math.min(b.mh-b.hp,b.mh/CFG.repairSeconds*dt),debt=rp.debt,inc={};let ok=true;
+  for(const r of RESN){const c=(COST[b.type]||{})[r]||0;if(!c)continue;inc[r]=(debt[r]||0)+c*CFG.costFraction*gain/b.mh;if(G.res[r]<Math.floor(inc[r])){ok=false;break}}
+  if(!ok){stop(b,'quiet');noRes.push(b);continue}
+  for(const r in inc){const pay=Math.floor(inc[r]);G.res[r]-=pay;debt[r]=inc[r]-pay}
+  b.hp+=gain;
+  if(b.hp>=b.mh-1e-6){b.hp=b.mh;if(stop(b,'quiet'))done.push(b)}}
+ if(paused.length)say(paused.length===1?NM(paused[0])+': repair paused — enemies nearby':plural(paused.length,'building')+': repair paused — enemies nearby');
+ if(noRes.length)say('Repair stopped: not enough resources'+(noRes.length>1?' ('+plural(noRes.length,'building')+')':''));
+ if(done.length)say(done.length===1?NM(done[0])+' fully repaired':plural(done.length,'building')+' fully repaired')};
+/* ---------- settlement overview (every player building; all of B is player-owned) ---------- */
+function status(){
+ const o={repairing:0,paused:0,eligible:0,blocked:0,building:0,full:0,total:B.length,damaged:0};
+ for(const b of B){
+  if(b.p<1){if(b.hp<b.mh-1e-6)o.building++;continue}
+  if(!(b.hp<b.mh-1e-6)){o.full++;continue}
+  o.damaged++;
+  if(ACTIVE.has(b)){if(b._rp&&b._rp.paused)o.paused++;else o.repairing++;continue}
+  if(threat(b))o.blocked++;else o.eligible++}
+ return o}
+function repairAll(){
+ const reserve={},res={started:0,blocked:0,noRes:0,already:0,skipped:0};
+ for(const b of [...B]){
+  if(b.p<1||!(b.hp<b.mh-1e-6))continue;
+  if(ACTIVE.has(b)){res.already++;continue}
+  const r=tryStart(b,reserve);
+  if(r.ok)res.started++;else if(r.code==='threat')res.blocked++;else if(r.code==='res')res.noRes++;else res.skipped++}
+ const p=[];if(res.started)p.push('started '+plural(res.started,'repair'));if(res.already)p.push(res.already+' already repairing');
+ if(res.blocked)p.push(res.blocked+' blocked by nearby enemies');if(res.noRes)p.push(res.noRes+' skipped: not enough resources');
+ say(p.length?'Repair All: '+p.join(' · '):'Repair All: nothing to repair');return res}
+/* ---------- panel button for the selected building(s) ---------- */
+const btn=document.createElement('button');btn.id='repair-btn';$('tr').after(btn);
+const note=document.createElement('div');note.id='repair-note';btn.after(note);
+const selB=()=>{const a=window.FEATURE_CTRLGROUPS_V2;return a&&a.selectedBuildings?a.selectedBuildings():(SB?[SB]:[])};
+btn.onclick=()=>{const l=selB().filter(inGame),todo=l.filter(b=>canRepair(b)&&!ACTIVE.has(b));
+ if(todo.length){let n=0;const reserve={};for(const b of todo){const r=tryStart(b,reserve);if(r.ok)n++}if(!n)say(why(todo[0])||'Not enough resources to repair');return}
+ for(const b of l)stop(b,'manual')};
+const _ui=window.uiUpdate;let rat=0,rstat=null;
+window.uiUpdate=function(){_ui();
+ const l=selB().filter(inGame);
+ if(!l.length){btn.style.display='none';note.style.display='none'}
+ else{
+  const rep=l.filter(b=>ACTIVE.has(b)),pausedL=rep.filter(b=>b._rp&&b._rp.paused),dmgAll=l.filter(b=>b.p>=1&&b.hp<b.mh-1e-6&&!ACTIVE.has(b));
+  const dmg=dmgAll.filter(b=>!threat(b)),blocked=dmgAll.filter(b=>threat(b)),pending=l.filter(b=>b.hp<b.mh-1e-6&&b.p<1);
+  btn.classList.remove('dis','on','warn');let nt='';
+  if(dmg.length){btn.style.display='inline-block';const t={};for(const b of dmg){const c=cost(b);for(const r in c)t[r]=(t[r]||0)+c[r]}
+   btn.textContent='Repair'+(dmg.length>1?' ('+dmg.length+')':'')+' — '+costText(t);btn.title='Restores HP gradually over about '+Math.round(CFG.repairSeconds)+' s; costs are paid as HP is restored (≈'+Math.round(CFG.costFraction*100)+'% of build cost for a full repair)';
+   if(blocked.length)nt=plural(blocked.length,'selected building')+' can\'t be repaired: enemies within '+CFG.threatRadius+' tiles.'}
+  else if(rep.length){btn.style.display='inline-block';
+   if(pausedL.length===rep.length){btn.classList.add('warn');btn.textContent='Stop repair — paused: enemies nearby';nt='Enemies are within '+CFG.threatRadius+' tiles. Repair is paused (nothing is healed or paid) and resumes after the area has been clear for '+CFG.resumeDelay+' s.'}
+   else{btn.classList.add('on');btn.textContent='Stop repair'+(rep.length>1?' ('+rep.length+')':'')+' · HP '+Math.ceil(rep[0].hp)+'/'+rep[0].mh;if(pausedL.length)nt=plural(pausedL.length,'building')+' paused: enemies nearby.'}}
+  else if(blocked.length){btn.style.display='inline-block';btn.classList.add('dis','warn');btn.textContent='Repair unavailable — enemies nearby';nt='Enemies are within '+CFG.threatRadius+' tiles of '+(blocked.length>1?plural(blocked.length,'selected building'):'this building')+' ('+threat(blocked[0])+' close). Clear them first.'}
+  else if(pending.length){btn.style.display='inline-block';btn.classList.add('dis');btn.textContent='Repair — finish construction first'}
+  else btn.style.display='none';
+  note.textContent=nt;note.style.display=nt?'block':'none'}
+ /* Repair All: floats above the right end of the build bar (outside #bar on purpose) */
+ if(rall){const now=performance.now();
+  if(now-rat>250){rat=now;rstat=status()}
+  const s=rstat,show=CFG.repairAllButton&&G.started&&G.state==='play'&&(s.damaged>0||s.building>0);
+  rall.style.display=show?'block':'none';
+  if(show){const parts=[];if(s.repairing)parts.push(s.repairing+' repairing');if(s.eligible)parts.push(s.eligible+' ready');if(s.paused+s.blocked)parts.push((s.paused+s.blocked)+' blocked by enemies');if(s.building)parts.push(s.building+' under construction');
+   rall.querySelector('small').textContent=parts.join(' · ')||'—';
+   const none=s.eligible+s.blocked===0;rall.classList.toggle('dis',none);rall.classList.toggle('warn',(s.paused+s.blocked)>0);
+   rall.title=none?(s.repairing?'Everything damaged is already being repaired':'Nothing can be repaired right now'):'Start repairing '+plural(s.eligible,'damaged building')+(s.blocked?' ('+s.blocked+' blocked by enemies are skipped)':'')+' at the normal cost and speed';
+   const bar=document.getElementById('bar');if(bar){const r=bar.getBoundingClientRect();rall.style.left=Math.max(8,Math.round(r.right-rall.offsetWidth))+'px';rall.style.top=Math.round(r.top-rall.offsetHeight-6)+'px'}}}
+};
+const rall=CFG.repairAllButton?document.createElement('button'):null;
+if(rall){rall.id='repair-all';rall.innerHTML='<b>REPAIR ALL</b><small></small>';document.body.appendChild(rall);
+ rall.onclick=()=>{if(rall.classList.contains('dis')){say(rall.title);return}repairAll();rat=0};
+ rall.addEventListener('pointerdown',e=>e.stopPropagation())}
+/* small green + above buildings being repaired (amber when paused) */
+const _dw=window.drawWorld;
+window.drawWorld=function(T,z,ox,oy){_dw(T,z,ox,oy);if(!CFG.marker||!ACTIVE.size)return;
+ g.save();g.setTransform(dpr*z,0,0,dpr*z,dpr*ox,dpr*oy);g.textAlign='center';g.font='bold 18px Georgia,serif';
+ for(const b of ACTIVE){const p=b._rp&&b._rp.paused,cx=b.x+b.w/2,cy=b.y+b.w/2,sx=X(cx,cy),sy=Y(cx,cy,1)-(typeof AIM!=='undefined'&&AIM[b.type]||30)*1.15-8-(p?0:Math.abs(Math.sin(G.T*3))*4);g.fillStyle='rgba(20,40,20,.85)';g.fillText(p?'!':'+',sx+1,sy+1);g.fillStyle=p?'#ffb060':'#7be66a';g.fillText(p?'!':'+',sx,sy)}
+ g.restore()};
+window.FEATURE_BUILDING_REPAIR={id:ID,cfg:CFG,start,stop:b=>stop(b,'manual'),canRepair,why,cost,threat,repairAll,status,repairing:()=>[...ACTIVE]};
+})();
+</script>
+<!-- ===== FEATURE: BUILDING-REPAIR END (id: BUILDING-REPAIR-1.1.0) ===== -->
