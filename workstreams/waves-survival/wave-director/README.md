@@ -26,9 +26,10 @@ It is **not a second wave controller**: it wraps the host's `waveTick(dt)` and *
 
 ## Files
 - `src/FEATURE_WAVE-DIRECTOR.html` — the feature block (style + script), insert before `</body>`
-- `tests/` — headless-browser tests + `build_test_game.py` (injects the block into a *temporary* copy of the game)
+- `tests/` — headless-browser tests (behaviour, host-contract preflight, integration regression, save/load hazards) + `build_test_game.py` (injects the block into a *temporary* copy of the game); see `tests/README.md`
 - `docs/` — screenshots
-- `INTEGRATION.md` — hooks, steps, API, events, test results, assumptions
+- `INTEGRATION.md` — hooks, API, ranked fragile points, exact test coverage, what is **not** tested
+- `INTEGRATION_CHECKLIST.md` — ordered checklist, mandatory glue, regression commands for the integrator
 
 ## Limitations
-See `INTEGRATION.md` (one host enemy type → variants are stat multipliers only; no save/load; only enemies spawned by the director are tracked).
+See `INTEGRATION.md`. Headlines: one host enemy type → variants are stat multipliers only; **Save/Load needs a one-line re-adoption call** (`disable(); enable()`); not integrated into the latest game and **not manually playtested**; balance unvalidated.
