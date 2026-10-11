@@ -1,4 +1,4 @@
-<!-- ===== FEATURE: WAVE-DIRECTOR START (id: WAVE-DIRECTOR-1.0.0) =====
+<!-- ===== FEATURE: WAVE-DIRECTOR START (id: WAVE-DIRECTOR-1.1.0) =====
  Survival attack schedule: warning -> countdown -> wave (scheduled spawns) -> completion detection -> recovery -> next preparation -> ... -> final wave -> signal.
  THERE IS STILL ONLY ONE WAVE CONTROLLER: this module REPLACES the scheduling part of the host's waveTick(dt) (it wraps it) - it does not run beside it.
  It owns no enemy AI, no combat and no clock. Everything it does is driven by the sim dt the host already passes to waveTick, so
@@ -6,15 +6,17 @@
  REUSED host systems:  planWave() (spawn-point choice + 'warn' event/marker), startNight() (wave++ , spawn-point validation, horn + toast, phase 'night'),
    spawnE(p) (the ONLY place enemies are created - stats, AI fields, G.wE counting), endGame(true|false) (victory/defeat screen), pickSpawns(), dirName(), ev(), toast via ev('toast'),
    killQuiet() (cancel), callNight() / N key / "Call wave" button (still work), the host HUD line #wv and the spawn-point markers (G.pts / G.warned / G.sq / G.phase are kept mirrored).
+ 1.1.0 (final): auto-RESYNC when the host replaces the world under it (Save/Load: new HQ / enemy objects) - no glue call needed; snapshot()/restore() for exact continuation;
+   wave TIMEOUT for stuck enemies (no soft-lock); banner placed under the real toolbar height; sound cues through the host's own ev('snd'); 'cleared' toast with kills + seconds.
  WHAT IT ADDS: preparation timer per wave, warning lead, countdown events, recovery breather after a cleared wave, wave size + composition tables
    (grunt / swift / brute = the SAME host enemy with hp / dmg / speed multipliers through its existing fields mh, hp, dmg, sm), tracking of the exact enemies it spawned,
    completion detection from those enemies (deaths, quiet removals, age-out), hold/resume, cancel/restart, configurable finalWave (Infinity = endless) and the final-wave signal.
  DEFAULTS reproduce the host's curve for waves 1-5: counts 5,8,11,14,18 (+4 per wave after), preparation 55 s then 45 s, warning 22 s before, spawn lead 2 s, 0.8 s spacing.
  SIGNALS: FEATURE_WAVE_DIRECTOR.on('finalWaveDefeated', fn)  |  window event 'bastion:final-wave-defeated'  |  FEATURE_WAVE_DIRECTOR.status().finalDefeated  (then host endGame(true) unless cfg.onFinalDefeated==='signal').
  Touches: wraps waveTick, uiUpdate. No host edits. DOM ids: wavedir-banner, wavedir-css.
- API: window.FEATURE_WAVE_DIRECTOR { cfg, on(evt,fn)->off, status(), callWave(), pause(), resume(), cancel(opts), start(opts), jumpTo(n), enable(), disable(), countFor(w), composition(w), version }
+ API: window.FEATURE_WAVE_DIRECTOR { cfg, on(evt,fn)->off, status(), callWave(), pause(), resume(), cancel(opts), start(opts), jumpTo(n), snapshot(), restore(snap), resync(), enable(), disable(), countFor(w), composition(w), version }
  EVENTS (detail also dispatched as window 'wavedirector' CustomEvent {type,...}): prepStart warning countdown waveStart finalWaveStart spawn enemyDown waveCleared recoveryStart recoveryEnd
-   finalWaveDefeated held released cancelled started blocked lost pause resume
+   finalWaveDefeated held released cancelled started blocked lost pause resume resync restored waveTimeout
 -->
 <style id="wavedir-css">
 #wavedir-banner{position:fixed;left:50%;top:180px;transform:translateX(-50%);z-index:6;pointer-events:none;display:none;text-align:center;font:13px Georgia,serif;color:#f3e3c0;
@@ -30,7 +32,7 @@
 <script id="feature-wavedir">
 (()=>{
 'use strict';
-const ID='WAVE-DIRECTOR-1.0.0';
+const ID='WAVE-DIRECTOR-1.1.0';
 const HOST={G:typeof G,B:typeof B,E:typeof E,waveTick:typeof waveTick,startNight:typeof startNight,planWave:typeof planWave,spawnE:typeof spawnE,endGame:typeof endGame,pickSpawns:typeof pickSpawns,
  ev:typeof ev,killQuiet:typeof killQuiet,uiUpdate:typeof uiUpdate,dirName:typeof dirName,DAYLEN:typeof DAYLEN,WARN:typeof WARN,WAVES:typeof WAVES,COUNTS:typeof COUNTS};
 const missing=Object.keys(HOST).filter(k=>HOST[k]==='undefined');
@@ -48,6 +50,9 @@ const CFG={
  spawnLead:2,                     // seconds from wave start to first spawn (host: 2)
  spawnInterval:.8,                // seconds between spawns (host: .8)
  maxSpawnSpan:24,                 // a very large wave is compressed so all of it arrives within this many seconds
+ waveTimeout:240,                // seconds after wave start: once everything has spawned, enemies still alive then are 'stragglers' (stuck / unreachable). 0 = off. Host age-out is 300 s
+ timeoutAction:'kill',            // 'kill' = remove stragglers quietly (killQuiet) and clear the wave; 'orphan' = clear the wave, leave them fighting untracked
+ sounds:true,                     // cues via the host's ev('snd'): 'done' at the warning and at a cleared wave, 'cmd' ticks for the last 3 countdown seconds, 'boom' when the final wave starts
  clearDelay:1,                    // all enemies of the wave must stay gone this long before 'waveCleared' (debounce)
  counts:COUNTS.slice(),           // enemies for waves 1..n (host table)
  countGrowth:4,                   // waves beyond the table: last count + growth per extra wave
@@ -70,7 +75,7 @@ const finalOf=()=>(cfg.finalWave!=null&&isFinite(cfg.finalWave))?cfg.finalWave:n
 
 /* ---------------------------- STATE ---------------------------- */
 const D={enabled:true,state:'idle',held:false,next:1,prepLen:0,warned:false,fired:new Set(),lastT:0,recLen:0,
- tracked:new Set(),total:0,spawned:0,killed:0,clearT:0,totalKilled:0,finalDefeated:false,resumeWave:1,lastSpeed:null};
+ tracked:new Set(),vanished:0,hq:null,total:0,spawned:0,killed:0,clearT:0,totalKilled:0,finalDefeated:false,resumeWave:1,lastSpeed:null};
 const LS={};
 function on(evt,fn){(LS[evt]=LS[evt]||[]).push(fn);return()=>{LS[evt]=(LS[evt]||[]).filter(f=>f!==fn)}}
 function emit(type,detail){const d=Object.assign({type},detail||{});
@@ -91,7 +96,9 @@ const prepFor=w=>Math.max(0,w<=1?cfg.prepFirst:cfg.prepBetween);
 function enterPrep(){D.state='prep';D.next=G.wave+1;D.prepLen=prepFor(D.next);D.warned=false;D.fired=new Set();
  G.phase='day';G.t=0;G.warned=false;G.pts=[];G.sq=[];D.lastT=0;D.clearT=0;
  emit('prepStart',{wave:D.next,seconds:D.prepLen,final:isFinal(D.next)})}
-function pruneTracked(){let n=0;for(const e of Array.from(D.tracked)){if(e.dead||E.indexOf(e)<0){D.tracked.delete(e);D.killed++;D.totalKilled++;n++;emit('enemyDown',{enemy:e,killed:e.hp<=0,wave:G.wave})}}return n}
+function pruneTracked(){let n=0;for(const e of Array.from(D.tracked)){if(!(e.dead||E.indexOf(e)<0))continue;D.tracked.delete(e);
+  if(e.dead){D.killed++;D.totalKilled++;n++;emit('enemyDown',{enemy:e,killed:e.hp<=0,wave:G.wave})}else D.vanished++}   /* gone WITHOUT dead=true = the object was replaced (a load), not killed */
+ return n}
 function spawnOne(s){const n0=E.length;spawnE(s.p);if(E.length!==n0+1)return;const e=E[E.length-1],T=cfg.types[s.type]||cfg.types[cfg.baseType]||{hp:1,dmg:1,speed:1},w=G.wave;
  const hpm=T.hp*(1+cfg.hpGrowth*(w-1));e.mh=e.hp=e.mh*hpm;e.dmg=Math.max(1,Math.round(e.dmg*T.dmg));if(T.speed!==1)e.sm=T.speed;e.wtype=s.type;e.wnum=w;
  D.tracked.add(e);D.spawned++;emit('spawn',{enemy:e,kind:s.type,wave:w,index:D.spawned,total:D.total})}
@@ -102,27 +109,42 @@ function beginWave(){
  const w=G.wave,list=planList(w),n=list.length,step=n>1?Math.min(cfg.spawnInterval,cfg.maxSpawnSpan/(n-1)):0;
  G.sq=list.map((k,i)=>({t:cfg.spawnLead+i*step,p:G.pts[i%G.pts.length],type:k}));   /* ... which we replace with the director's schedule (same {t,p} shape) */
  D.state='wave';D.total=n;D.spawned=0;D.killed=0;D.clearT=0;D.tracked=new Set();
- const fin=isFinal(w);if(fin)ev('toast','FINAL WAVE — '+n+' enemies approach');
+ const fin=isFinal(w);if(fin){ev('toast','FINAL WAVE — '+n+' enemies approach');if(cfg.sounds)ev('snd','boom')}
  emit('waveStart',{wave:w,count:n,composition:composition(w),final:fin,points:G.pts.slice()});if(fin)emit('finalWaveStart',{wave:w,count:n})}
-function waveCleared(){const w=G.wave,fin=isFinal(w);
- emit('waveCleared',{wave:w,final:fin,kills:D.killed,seconds:G.t});
+function waveCleared(){const w=G.wave,fin=isFinal(w),secs=Math.round(G.t);
+ emit('waveCleared',{wave:w,final:fin,kills:D.killed,seconds:G.t});if(cfg.sounds&&!fin)ev('snd','done');
  if(fin){D.finalDefeated=true;D.state='finished';emit('finalWaveDefeated',{wave:w,kills:D.totalKilled});
   if(cfg.onFinalDefeated==='victory')endGame(true);else{G.phase='day';G.pts=[];G.warned=false;G.t=0}return}
  G.phase='day';G.day++;G.pts=[];G.warned=false;G.t=0;G.sq=[];D.recLen=Math.max(0,cfg.recovery);D.state='recovery';
- ev('toast','Wave '+w+' cleared — prepare your defences');emit('recoveryStart',{wave:w,seconds:D.recLen});
+ ev('toast','Wave '+w+' cleared · '+D.killed+' slain in '+secs+'s — prepare your defences');emit('recoveryStart',{wave:w,seconds:D.recLen});
  if(D.recLen<=0){emit('recoveryEnd',{wave:w});enterPrep()}}
 function stepPrep(dt){G.t+=dt;const rem=D.prepLen-G.t,jumped=G.t-D.lastT>dt+1;   /* a forward jump of G.t = the host's callNight() / "Call wave" button */
- if(!D.warned&&rem<=Math.min(cfg.warnLead,D.prepLen)&&rem>0){planWave();D.warned=true;emit('warning',{wave:D.next,seconds:Math.max(0,Math.ceil(rem)),points:G.pts.slice(),final:isFinal(D.next)})}
- for(const s of cfg.countdownAt)if(rem<=s&&rem>0&&!D.fired.has(s)){D.fired.add(s);emit('countdown',{wave:D.next,seconds:s})}
+ if(!D.warned&&rem<=Math.min(cfg.warnLead,D.prepLen)&&rem>0){planWave();D.warned=true;if(cfg.sounds)ev('snd','done');emit('warning',{wave:D.next,seconds:Math.max(0,Math.ceil(rem)),points:G.pts.slice(),final:isFinal(D.next)})}
+ for(const s of cfg.countdownAt)if(rem<=s&&rem>0&&!D.fired.has(s)){D.fired.add(s);if(cfg.sounds&&s<=3)ev('snd','cmd');emit('countdown',{wave:D.next,seconds:s})}
  D.lastT=G.t;if(rem<=0||jumped)beginWave()}
 function stepWave(dt){G.t+=dt;
  while(G.sq.length&&G.sq[0].t<=G.t)spawnOne(G.sq.shift());
  pruneTracked();
+ if(D.vanished){resync('enemy objects replaced');return}
+ if(cfg.waveTimeout>0&&!G.sq.length&&G.t>=cfg.waveTimeout&&D.tracked.size>0){const left=Array.from(D.tracked);emit('waveTimeout',{wave:G.wave,alive:left.length,action:cfg.timeoutAction});
+  if(cfg.timeoutAction==='kill')for(const e of left)killQuiet(e);else D.tracked=new Set()}
  if(!G.sq.length&&D.tracked.size===0&&D.spawned>0){D.clearT+=dt;if(D.clearT>=cfg.clearDelay)waveCleared()}else D.clearT=0}
 function stepRecovery(dt){G.t+=dt;if(G.t>=D.recLen){emit('recoveryEnd',{wave:G.wave});enterPrep()}}
 
-/* adopt a game that is already running (director enabled late / after disable()) */
-function adopt(){if(G.phase==='night'){D.state='wave';D.tracked=new Set(E.filter(e=>!e.wl&&!e.dead));D.spawned=D.tracked.size;D.total=D.spawned+G.sq.length;D.killed=0;D.clearT=0}else enterPrep()}
+/* adopt a game that is already running (enabled late, after disable(), or after the host REPLACED its world = a load). Keeps G.t: a save in the middle of a preparation resumes where it was. */
+function adopt(){D.tracked=new Set(E.filter(e=>!e.wl&&!e.dead));D.vanished=0;D.clearT=0;D.hq=B.find(b=>b.type==='hq')||null;
+ if(G.phase==='night'){D.state='wave';D.spawned=D.tracked.size;D.total=D.spawned+G.sq.length;D.killed=0}
+ else{D.state='prep';D.next=G.wave+1;D.prepLen=prepFor(D.next);D.warned=!!G.warned&&G.pts.length>0;D.fired=new Set(cfg.countdownAt.filter(s=>D.prepLen-G.t<=s));D.lastT=G.t}}
+function resync(reason){adopt();emit('resync',{reason:reason||'manual',state:D.state,alive:D.tracked.size,wave:G.wave});return true}
+/* exact continuation (optional): a Save/Load feature stores snapshot() with its save and calls restore() after it has restored G / B / E. Without it the automatic resync above still keeps the run consistent. */
+function snapshot(){pruneTracked();return{v:1,state:D.state,held:D.held,next:D.next,prepLen:D.prepLen,recLen:D.recLen,warned:D.warned,fired:Array.from(D.fired),total:D.total,spawned:D.spawned,killed:D.killed,totalKilled:D.totalKilled,finalDefeated:D.finalDefeated,resumeWave:D.resumeWave,queueTypes:G.sq.map(q=>q.type||cfg.baseType)}}
+function restore(x){const num=v=>typeof v==='number'&&isFinite(v)&&v>=0;
+ if(!x||x.v!==1||!['prep','wave','recovery','finished','cancelled'].includes(x.state))return false;
+ if(!(x.state==='wave'?G.phase==='night':G.phase==='day'))return false;                /* snapshot and restored host state disagree: caller falls back to the automatic resync */
+ if(![x.next,x.prepLen,x.recLen,x.total,x.spawned,x.killed,x.totalKilled,x.resumeWave].every(num)||!Array.isArray(x.fired)||!Array.isArray(x.queueTypes))return false;
+ adopt();D.state=x.state;D.held=!!x.held;D.next=x.next;D.prepLen=x.prepLen;D.recLen=x.recLen;D.warned=!!x.warned;D.fired=new Set(x.fired.filter(num));D.total=x.total;D.spawned=x.spawned;D.killed=x.killed;D.totalKilled=x.totalKilled;D.finalDefeated=!!x.finalDefeated;D.resumeWave=x.resumeWave;
+ if(x.queueTypes.length===G.sq.length)G.sq.forEach((q,i)=>{if(cfg.types[x.queueTypes[i]])q.type=x.queueTypes[i]});
+ D.lastT=G.t;emit('restored',{state:D.state,wave:G.wave,alive:D.tracked.size});return true}
 const hasHQ=()=>B.some(b=>b.type==='hq');
 
 const origWaveTick=waveTick;
@@ -130,7 +152,9 @@ window.waveTick=function(dt){
  if(!D.enabled)return origWaveTick(dt);
  if(!G.started){if(hasHQ()){G.started=true;G.t=0}else{G.night+=((G.phase==='night'?1:0)-G.night)*(1-Math.exp(-dt*.9));return}}
  else if(!hasHQ()){if(D.state!=='lost'){D.state='lost';emit('lost',{wave:G.wave})}endGame(false);return}
- if(D.state==='idle')adopt();
+ const hq=B.find(b=>b.type==='hq');
+ if(D.state!=='idle'&&D.hq&&hq&&hq!==D.hq&&!D.hq.dead)resync('world replaced (new HQ object)');   /* Save/Load: B and E are rebuilt */
+ if(D.state==='idle')adopt();else if(hq)D.hq=hq;
  if(!D.held){if(D.state==='prep')stepPrep(dt);else if(D.state==='wave')stepWave(dt);else if(D.state==='recovery')stepRecovery(dt)}
  G.night+=((G.phase==='night'?1:0)-G.night)*(1-Math.exp(-dt*.9))};
 
@@ -170,6 +194,7 @@ function hud(){const s=status(),fw=s.finalWave,nm=names();
  if(t&&wv)wv.textContent=t+tag;
  if(G.state==='won'&&fw&&fw!==WAVES){const rp=$('rp');if(rp&&rp.textContent.indexOf('all '+WAVES+' nights')>=0)rp.textContent=rp.textContent.replace('all '+WAVES+' nights','all '+fw+' waves').replace('Nights survived: '+WAVES,'Waves survived: '+fw)}
  if(!cfg.banner)return;const b=ensureBanner();if(!b)return;let h='',cls='';
+ {const rs=$('rs'),top=rs?Math.round(rs.getBoundingClientRect().bottom)+44:180;if(b._top!==top){b.style.top=top+'px';b._top=top}}   /* below the host toolbar even when Save/Load makes it taller */
  if(G.state!=='play'){b.style.display='none';return}
  if(s.state==='prep'&&s.remaining<=10&&s.remaining>0){cls='warn'+(s.isFinal?' final':'');h=`<b>${s.isFinal?'FINAL WAVE':'WAVE '+s.nextWave} IN ${Math.ceil(s.remaining)}</b><small>${nm?'Attack from '+nm:'Brace yourselves'}</small>`}
  else if(s.state==='prep'&&D.warned){cls=s.isFinal?'final':'';h=`<b>${s.isFinal?'FINAL WAVE':'WAVE '+s.nextWave} INCOMING</b><small>${nm?'From '+nm+' · ':''}${Math.ceil(s.remaining)}s</small>`}
@@ -180,8 +205,8 @@ function hud(){const s=status(),fw=s.finalWave,nm=names();
  if(h){b.className=cls;if(b._h!==h){b.innerHTML=h;b._h=h}b.style.display='block'}else b.style.display='none'}
 window.uiUpdate=function(){const r=origUi.apply(this,arguments);try{hud()}catch(e){}return r};
 
-window.FEATURE_WAVE_DIRECTOR={version:ID,cfg,on,status,callWave,pause,resume,cancel,start,jumpTo,enable,disable,countFor,composition,planList};
+window.FEATURE_WAVE_DIRECTOR={version:ID,cfg,on,status,callWave,pause,resume,cancel,start,jumpTo,snapshot,restore,resync,enable,disable,countFor,composition,planList};
 console.log('['+ID+'] loaded — final wave '+(finalOf()||'endless')+', counts '+[1,2,3,4,5].map(countFor).join('/'));
 })();
 </script>
-<!-- ===== FEATURE: WAVE-DIRECTOR END (id: WAVE-DIRECTOR-1.0.0) ===== -->
+<!-- ===== FEATURE: WAVE-DIRECTOR END (id: WAVE-DIRECTOR-1.1.0) ===== -->

@@ -1,6 +1,6 @@
 # Wave Director — integration checklist for Main Claude
 
-Module: `WAVE-DIRECTOR-1.0.0` · `src/FEATURE_WAVE-DIRECTOR.html` (one block: `<style>` + `<script>`, no host edits) · details and risk table: `INTEGRATION.md`.
+Module: `WAVE-DIRECTOR-1.1.0` · `src/FEATURE_WAVE-DIRECTOR.html` (one block: `<style>` + `<script>`, no host edits) · details and risk table: `INTEGRATION.md`.
 **Status of this document:** everything below was verified only against the supplied 2026-10-10 prototype. **Not integrated into the latest game, not manually playtested.**
 
 ## 0. Before touching anything
@@ -15,11 +15,13 @@ Module: `WAVE-DIRECTOR-1.0.0` · `src/FEATURE_WAVE-DIRECTOR.html` (one block: `<
 3. **`FEATURE_WAVE-DIRECTOR.html` last**, immediately before `</body>` (its `uiUpdate` wrapper then writes `#wv` after everyone else; both orders were tested for behaviour).
 Insert once. Keep the `FEATURE: WAVE-DIRECTOR START/END` markers. Never add a second wave controller; do not call `startNight`/`planWave` yourself.
 
-## 2. Mandatory glue
+## 2. Glue (none mandatory in 1.1.0)
 | When | Do | Why |
 |---|---|---|
-| **After every successful Save/Load restore** (`BASTION-SAVE-LOAD`) | `if(window.FEATURE_WAVE_DIRECTOR){FEATURE_WAVE_DIRECTOR.disable();FEATURE_WAVE_DIRECTOR.enable();}` — synchronously, before the next sim step | Without it a mid-wave load declares the wave *cleared* with enemies alive, and a preparation load can start the wave immediately (both reproduced). With it the director re-adopts the restored wave (tested). Cost: a preparation/recovery save resumes as a **fresh** preparation. |
-| Save validator | Keep `cfg.finalWave ≤ WAVES` (default) **or** raise the validator's `wave > WAVES` limit | PR #12 rejects saves with `wave > WAVES` (read from its source) |
+| After a `BASTION-SAVE-LOAD` restore | **Nothing required** — the director auto-resyncs when it sees a replaced world (new HQ object, or tracked enemies gone without `dead=true`) and emits `resync`. | Verified against the real PR #12 code (`test_real_saveload.py`). Cost without the adapter: a recovery-period save resumes as a fresh preparation; per-wave counters after a mid-wave load are approximate. |
+| *Recommended* exact-continuation adapter | In the save: `data.waveDirector = FEATURE_WAVE_DIRECTOR.snapshot()`. After a successful load: `if(data.waveDirector) FEATURE_WAVE_DIRECTOR.restore(data.waveDirector)` (returns `false` → the automatic resync stays in effect). Guard both with `window.FEATURE_WAVE_DIRECTOR`. | Keeps preparation/recovery timers, countdown state, queue types and kill counters. Tested (`test_state_restore.py`, `test_v11_final.py`). Needs a one-key extension of the save format — an integrator decision. |
+| Any code that writes a larger `G.t` *in place* | Call `FEATURE_WAVE_DIRECTOR.resync()` right after | An in-place forward jump > 1 s in preparation is read as "call wave" (the host's `callNight` does exactly that). |
+| Save validator | Keep `cfg.finalWave ≤ WAVES` (default) **or** raise the validator's `wave > WAVES` limit | PR #12 refuses saves with `wave > WAVES` (confirmed by `test_real_saveload.py`) |
 | Host changes `WAVES` | Nothing; `cfg.finalWave` defaults to `WAVES` at load. Set it explicitly afterwards to override | |
 
 Optional hooks (no action needed): `FEATURE_WAVE_DIRECTOR.on('spawn'|'enemyDown'|'waveStart'|'waveCleared'|'finalWaveDefeated', fn)`; `e.wtype` / `e.wnum` on wave enemies; full API in `INTEGRATION.md`.
@@ -38,10 +40,13 @@ Build/point `GAME_DIR` at the **integrated** game (director present):
 ```
 python3 tests/test_wave_director.py          # expect 82/82   (needs a game WITHOUT other features' console warnings; see note)
 python3 tests/test_integration_regression.py # expect 18/18
-python3 tests/test_state_restore.py          # expect 5/5 and the three KNOWN LIMITATION lines (F1)
+python3 tests/test_state_restore.py          # expect 7/7 and one KNOWN LIMITATION line (in-place larger G.t)
+python3 tests/test_v11_final.py              # expect 24/24   (auto-resync, snapshot/restore, timeout, banner, sounds)
+# if Save/Load is merged: build with tests/build_saveload_game.py, then
+python3 tests/test_real_saveload.py          # expect 18/18
 ```
 Note: `test_wave_director.py` removes the defenders in parts A–C, and its "no console errors/warnings" checks fail if another block prints a warning (on the supplied build `BUILDING-REPAIR` does — 4 checks, unrelated). Triage by name before concluding anything.
-Then the host's own regression and each integrated feature's own tests. For Save/Load, add one **real** round-trip: save mid-wave → load → the glue call → wave continues and completes; save in preparation → load → countdown restarts from the full preparation.
+Then the host's own regression and each integrated feature's own tests. For Save/Load, add one **real** round-trip by hand: save mid-wave → load → the wave continues and completes (with the adapter the counters are exact); save in preparation → load → the preparation timer is kept.
 For `test_host_contract.py` on the integrated build, Part 2's "host-only phase start" is skipped automatically when the director is present.
 
 ## 5. Manual smoke list (NOT done by me — please run it)
@@ -50,7 +55,9 @@ For `test_host_contract.py` on the integrated build, Part 2's "host-only phase s
 - [ ] `N` / "Call wave" starts the wave at once; Space pause freezes everything; 1×/2×/3× speed scales it.
 - [ ] Waves 3–5: swifts (fast, fragile) and brutes (slow, tanky) appear; the final wave is labelled FINAL; defeating it shows the host victory screen.
 - [ ] Banner and the Save/Load-widened `#rs` toolbar do not overlap at your usual window sizes.
-- [ ] Save/Load mid-wave and in preparation with the glue call (section 2).
+- [ ] Save/Load mid-wave, in preparation and in recovery (with and without the optional adapter).
+- [ ] A stuck enemy: after `waveTimeout` (240 s) the wave closes with a toast/`waveTimeout` event instead of hanging.
+- [ ] Sound cues (warning, cleared, final wave) are audible and not annoying.
 - [ ] Kill switch: console `FEATURE_WAVE_DIRECTOR.disable()` returns the original host waves (tested headless).
 
 ## 6. Rollback
@@ -61,6 +68,6 @@ For `test_host_contract.py` on the integrated build, Part 2's "host-only phase s
 - `apply_rts_systems.py` fails its E4 help-text anchor on the supplied build.
 
 ## 8. Decisions for the owner
-1. Accept the `disable()/enable()` glue for now, or schedule a small `snapshot()/restore()` API in the director (≈20 lines, would keep prep timers across saves) — **not implemented**.
+1. Adopt the optional `snapshot()/restore()` adapter in Save/Load (exact continuation) or rely on auto-resync only.
 2. `finalWave` vs the Save/Load `wave > WAVES` validator (only matters for runs longer than 5 waves).
-3. Balance is untested: knobs for the playtest are `cfg.counts / countMult / hpGrowth / types / mixFor / prepFirst / prepBetween / recovery / warnLead / spawnInterval / maxSpawnSpan`. No wave timeout exists yet (a stuck enemy keeps a wave open until the host's 300 s age-out).
+3. Balance is untested: knobs for the playtest are `cfg.counts / countMult / hpGrowth / types / mixFor / prepFirst / prepBetween / recovery / warnLead / spawnInterval / maxSpawnSpan / waveTimeout`.

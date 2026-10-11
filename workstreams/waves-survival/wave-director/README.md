@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Feature ID | `WAVE-DIRECTOR-1.0.0` |
+| Feature ID | `WAVE-DIRECTOR-1.1.0` |
 | Workstream | `waves-survival` |
 | Issue / Project | [#9](https://github.com/CrazyShot/features-library/issues/9) · status is tracked in the [Project](https://github.com/users/CrazyShot/projects/1) (not here) |
 | Target game revision | "Emberfall" single-file prototype supplied 2026-10-10 (`index (2).html`, sha256 `119f565650b7c0f7…`); main-repo commit: **to be filled in by the integrator** |
@@ -22,14 +22,16 @@ It is **not a second wave controller**: it wraps the host's `waveTick(dt)` and *
 - **Pause / resume / cancel** — game pause is free; `pause()/resume()` hold the schedule while the game runs; `cancel({killEnemies})` stops the attack cleanly; `start()` / `jumpTo(n)` restart.
 - **Final wave** — `cfg.finalWave` (default = host `WAVES`; `Infinity` = endless). When it is defeated: `finalWaveDefeated` event + window event `bastion:final-wave-defeated` + `status().finalDefeated`, then the host's `endGame(true)` (or nothing with `onFinalDefeated:'signal'`).
 
-![countdown](docs/screenshot_countdown.png) ![wave](docs/screenshot_wave.png)
+- **Robustness (1.1.0)** — auto-resync after a Save/Load world replacement, optional `snapshot()/restore()`, a wave timeout so a stuck enemy cannot soft-lock the run, sound cues, a banner that sits below the real toolbar.
+
+![countdown](docs/screenshot_countdown.png) ![wave](docs/screenshot_wave.png) ![tall toolbar](docs/screenshot_tall_toolbar.png)
 
 ## Files
 - `src/FEATURE_WAVE-DIRECTOR.html` — the feature block (style + script), insert before `</body>`
 - `tests/` — headless-browser tests (behaviour, host-contract preflight, integration regression, save/load hazards) + `build_test_game.py` (injects the block into a *temporary* copy of the game); see `tests/README.md`
-- `docs/` — screenshots
+- `docs/` — screenshots (countdown, wave, tall-toolbar banner)
 - `INTEGRATION.md` — hooks, API, ranked fragile points, exact test coverage, what is **not** tested
 - `INTEGRATION_CHECKLIST.md` — ordered checklist, mandatory glue, regression commands for the integrator
 
 ## Limitations
-See `INTEGRATION.md`. Headlines: one host enemy type → variants are stat multipliers only; **Save/Load needs a one-line re-adoption call** (`disable(); enable()`); not integrated into the latest game and **not manually playtested**; balance unvalidated.
+See `INTEGRATION.md`. Headlines: one host enemy type → variants are stat multipliers only; Save/Load works without glue (auto-resync; optional `snapshot()/restore()` adapter for exact continuation); the Save/Load validator refuses `wave > WAVES`; not integrated into the latest game and **not manually playtested**; balance unvalidated.
