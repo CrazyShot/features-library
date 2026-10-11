@@ -80,7 +80,7 @@ async def part_a(p):
     ok("final wave (5) announced: finalWaveStart emitted exactly once",len(await ev("evs('finalWaveStart')"))==1 and (await ev("evs('waveStart')[4].final")))
     ok("final wave defeated: signal emitted once, finalDefeated flag set, host victory reached",len(await ev("evs('finalWaveDefeated')"))==1 and await ev("FEATURE_WAVE_DIRECTOR.status().finalDefeated") and await ev("G.state")=="won",await ev("G.state"))
     await ev("sim(200)");ok("nothing else is scheduled after victory",await ev("waveEnemies().length")==0 and await ev("G.wave")==5)
-    ok("A: no console errors/warnings",not [e for e in errs if "WAVE-DIRECTOR-1.0.0] loaded" not in e],errs[:3]);await b.close()
+    ok("A: no console errors/warnings",not [e for e in errs if "WAVE-DIRECTOR-" not in e or "] loaded" not in e],errs[:3]);await b.close()
 FEATURE_N={2:8,3:11,4:14,5:18}
 
 async def part_b(p):
